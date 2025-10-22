@@ -5,6 +5,7 @@
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>
     <UseWindowsForms>true</UseWindowsForms>
     <OutputType>Exe</OutputType>
@@ -29,16 +30,14 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="libs\Microsoft.FlightSimulator.SimConnect.dll">
-      <Link>Microsoft.FlightSimulator.SimConnect.dll</Link>
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    <Content Include="libs\Microsoft.FlightSimulator.SimConnect.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </None>
-    <None Update="libs\SimConnect.dll">
-      <Link>SimConnect.dll</Link>
-      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+    </Content>
+    <Content Include="libs\SimConnect.dll">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </None>
+    </Content>
   </ItemGroup>
 
 </Project>
