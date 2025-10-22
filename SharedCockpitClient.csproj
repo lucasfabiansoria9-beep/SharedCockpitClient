@@ -30,10 +30,14 @@
 
   <ItemGroup>
     <None Update="libs\Microsoft.FlightSimulator.SimConnect.dll">
+      <Link>Microsoft.FlightSimulator.SimConnect.dll</Link>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </None>
     <None Update="libs\SimConnect.dll">
+      <Link>SimConnect.dll</Link>
       <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </None>
   </ItemGroup>
 
