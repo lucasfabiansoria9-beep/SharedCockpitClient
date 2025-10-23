@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -82,6 +83,13 @@ namespace SharedCockpitClient
         enum DATA_REQUESTS
         {
             REQUEST_ATTITUDE, REQUEST_POSITION, REQUEST_SPEED, REQUEST_CONTROLS, REQUEST_CABIN, REQUEST_DOORS, REQUEST_GROUNDSUPPORT
+        }
+
+        enum DisplayState
+        {
+            WaitingConnection,
+            Synced,
+            NoData
         }
 
         // ---- ESTRUCTURAS DE DATOS ----
@@ -238,6 +246,42 @@ namespace SharedCockpitClient
         static DoorsStruct lastDoors = new();
         static GroundSupportStruct lastGround = new();
 
+        static bool hasAttitudeData;
+        static bool hasPositionData;
+        static bool hasSpeedData;
+
+        static readonly TimeSpan displayUpdateInterval = TimeSpan.FromMilliseconds(100);
+        static readonly TimeSpan displayTimeout = TimeSpan.FromSeconds(3);
+        static readonly TimeSpan broadcastInterval = TimeSpan.FromMilliseconds(100);
+
+        static DateTime lastFlightDataUtc = DateTime.MinValue;
+        static DateTime lastDisplayRenderUtc = DateTime.MinValue;
+        static DateTime lastBroadcastUtc = DateTime.MinValue;
+        static DateTime suppressBroadcastUntilUtc = DateTime.MinValue;
+
+        static string? pendingBroadcastPayload;
+
+        static readonly object broadcastLock = new();
+        static readonly object displayLock = new();
+        static int dataDisplayLine = -1;
+        static string lastDisplayedLine = string.Empty;
+        static ConsoleColor lastDisplayColor = ConsoleColor.Gray;
+        static DisplayState lastDisplayState = DisplayState.WaitingConnection;
+
+        static readonly object remoteDataLock = new();
+        static AttitudeStruct remoteAttitude = new();
+        static PositionStruct remotePosition = new();
+        static SpeedStruct remoteSpeed = new();
+        static ControlsStruct remoteControls = new();
+        static CabinStruct remoteCabin = new();
+        static DoorsStruct remoteDoors = new();
+        static GroundSupportStruct remoteGround = new();
+
+        static readonly JsonSerializerOptions flightDataJsonOptions = new()
+        {
+            PropertyNameCaseInsensitive = true
+        };
+
         static void Main()
         {
             Console.OutputEncoding = Encoding.UTF8;
@@ -245,6 +289,7 @@ namespace SharedCockpitClient
             ConfigureMode();
             SetupWebSocket();
             SetupShutdownHandlers();
+            ShowWaitingForData();
 
             try
             {
@@ -282,6 +327,8 @@ namespace SharedCockpitClient
             while (true)
             {
                 simconnect?.ReceiveMessage();
+                FlushPendingBroadcast();
+                EnsureDisplayFreshness();
                 Thread.Sleep(100); // 10Hz
             }
         }
@@ -340,7 +387,10 @@ namespace SharedCockpitClient
                     Console.WriteLine("✅ Copiloto conectado. Comenzaremos a enviar los datos de vuelo en cuanto cambien.");
                     warnedNoConnection = false;
                 };
-                hostServer.OnClientDisconnected += () => Console.WriteLine("ℹ️ Copiloto desconectado del servidor.");
+                hostServer.OnClientDisconnected += () =>
+                {
+                    Console.WriteLine("ℹ️ Copiloto desconectado del servidor.");
+                };
                 hostServer.OnMessage += OnWebSocketMessage;
                 hostServer.Start();
             }
@@ -351,9 +401,18 @@ namespace SharedCockpitClient
                 {
                     Console.WriteLine("🌐 Conectado al piloto principal.");
                     warnedNoConnection = false;
+                    ShowWaitingForData("⚠️ esperando datos del host...");
                 };
-                ws.OnError += (msg) => Console.WriteLine("⚠️ Error WebSocket: " + msg);
-                ws.OnClose += () => Console.WriteLine("🔌 Conexión WebSocket cerrada");
+                ws.OnError += (msg) =>
+                {
+                    Console.WriteLine("⚠️ Error WebSocket: " + msg);
+                    ShowWaitingForConnection();
+                };
+                ws.OnClose += () =>
+                {
+                    Console.WriteLine("🔌 Conexión WebSocket cerrada");
+                    ShowWaitingForConnection();
+                };
                 ws.OnMessage += OnWebSocketMessage;
                 ws.Connect();
             }
@@ -398,7 +457,132 @@ namespace SharedCockpitClient
 
         static void OnWebSocketMessage(string message)
         {
-            Console.WriteLine($"📨 Datos recibidos por WebSocket: {message}");
+            if (!TryParseFlightPayload(message, out var payload) || payload == null)
+            {
+                return;
+            }
+
+            if (payload.Position == null || payload.Speed == null || payload.Attitude == null)
+            {
+                return;
+            }
+
+            var attitude = new AttitudeStruct(
+                payload.Attitude.Pitch,
+                payload.Attitude.Bank,
+                payload.Attitude.Heading);
+
+            var position = new PositionStruct(
+                payload.Position.Latitude,
+                payload.Position.Longitude,
+                payload.Position.Altitude);
+
+            var speed = new SpeedStruct(
+                payload.Speed.IndicatedAirspeed,
+                payload.Speed.VerticalSpeed,
+                payload.Speed.GroundSpeed);
+
+            var controls = payload.Controls != null
+                ? new ControlsStruct(
+                    payload.Controls.Throttle,
+                    payload.Controls.Flaps,
+                    payload.Controls.Elevator,
+                    payload.Controls.Aileron,
+                    payload.Controls.Rudder,
+                    payload.Controls.ParkingBrake)
+                : remoteControls;
+
+            var cabin = payload.Cabin != null
+                ? new CabinStruct(
+                    payload.Cabin.LandingGearDown,
+                    payload.Cabin.SpoilersDeployed,
+                    payload.Cabin.AutopilotOn,
+                    payload.Cabin.AutopilotAltitude,
+                    payload.Cabin.AutopilotHeading)
+                : remoteCabin;
+
+            var doors = payload.Doors != null
+                ? new DoorsStruct(
+                    payload.Doors.DoorLeftOpen,
+                    payload.Doors.DoorRightOpen,
+                    payload.Doors.CargoDoorOpen,
+                    payload.Doors.RampOpen)
+                : remoteDoors;
+
+            var ground = payload.Ground != null
+                ? new GroundSupportStruct(
+                    payload.Ground.CateringTruckPresent,
+                    payload.Ground.BaggageCartsPresent,
+                    payload.Ground.FuelTruckPresent)
+                : remoteGround;
+
+            AttitudeStruct latestAttitude;
+            PositionStruct latestPosition;
+            SpeedStruct latestSpeed;
+            ControlsStruct latestControls;
+            CabinStruct latestCabin;
+            DoorsStruct latestDoors;
+            GroundSupportStruct latestGround;
+
+            lock (remoteDataLock)
+            {
+                remoteAttitude = attitude;
+                remotePosition = position;
+                remoteSpeed = speed;
+                remoteControls = controls;
+                remoteCabin = cabin;
+                remoteDoors = doors;
+                remoteGround = ground;
+
+                latestAttitude = remoteAttitude;
+                latestPosition = remotePosition;
+                latestSpeed = remoteSpeed;
+                latestControls = remoteControls;
+                latestCabin = remoteCabin;
+                latestDoors = remoteDoors;
+                latestGround = remoteGround;
+            }
+
+            if (HasMeaningfulFlightValues(
+                latestSpeed.IndicatedAirspeed,
+                latestSpeed.VerticalSpeed,
+                latestSpeed.GroundSpeed,
+                latestPosition.Altitude,
+                latestAttitude.Heading,
+                latestPosition.Latitude,
+                latestPosition.Longitude))
+            {
+                UpdateFlightDisplay(
+                    latestSpeed.IndicatedAirspeed,
+                    latestSpeed.VerticalSpeed,
+                    latestSpeed.GroundSpeed,
+                    latestPosition.Altitude,
+                    latestAttitude.Heading,
+                    latestPosition.Latitude,
+                    latestPosition.Longitude);
+
+                if (isHost)
+                {
+                    var relayPayload = JsonSerializer.Serialize(new
+                    {
+                        attitude = latestAttitude,
+                        position = latestPosition,
+                        speed = latestSpeed,
+                        controls = latestControls,
+                        cabin = latestCabin,
+                        doors = latestDoors,
+                        ground = latestGround
+                    });
+
+                    QueueBroadcast(relayPayload);
+                }
+
+                lock (broadcastLock)
+                {
+                    suppressBroadcastUntilUtc = DateTime.UtcNow.AddMilliseconds(200);
+                    pendingBroadcastPayload = null;
+                }
+            }
         }
 
         static string GetSimConnectExceptionDescription(uint code)
@@ -479,6 +663,324 @@ namespace SharedCockpitClient
         }
 
         static bool IsExitOpen(double value) => value > 0.5;
+
+        static void UpdateFlightDisplay(
+            double indicatedAirspeed,
+            double verticalSpeed,
+            double groundSpeed,
+            double altitudeMeters,
+            double headingDegrees,
+            double latitude,
+            double longitude,
+            DisplayState state = DisplayState.Synced)
+        {
+            var now = DateTime.UtcNow;
+
+            if (state != DisplayState.Synced)
+            {
+                ShowStatus(state, state == DisplayState.NoData ? "🔴 sin datos" : "⚠️ esperando datos...", force: true);
+                return;
+            }
+
+            lastFlightDataUtc = now;
+
+            string line = string.Format(
+                CultureInfo.InvariantCulture,
+                "🟢 🛫 IAS: {0:F1} kts | VS: {1:F1} fpm | GS: {2:F1} kts | ALT: {3:F1} m | HDG: {4:F1}° | LAT: {5:F1} | LON: {6:F1}",
+                indicatedAirspeed,
+                verticalSpeed,
+                groundSpeed,
+                altitudeMeters,
+                headingDegrees,
+                latitude,
+                longitude);
+
+            var color = GetStateColor(DisplayState.Synced);
+
+            bool needsRedraw = line != lastDisplayedLine || lastDisplayState != DisplayState.Synced || lastDisplayColor != color;
+            if (!needsRedraw)
+            {
+                lastDisplayRenderUtc = now;
+                return;
+            }
+
+            if (now - lastDisplayRenderUtc < displayUpdateInterval)
+            {
+                return;
+            }
+
+            RenderDisplayLine(line, DisplayState.Synced, color, now);
+        }
+
+        static void ShowWaitingForData(string message = "⚠️ esperando datos...", bool force = false)
+        {
+            if (!force && lastDisplayState == DisplayState.Synced)
+            {
+                return;
+            }
+
+            if (lastFlightDataUtc == DateTime.MinValue)
+            {
+                lastFlightDataUtc = DateTime.UtcNow;
+            }
+
+            ShowStatus(DisplayState.WaitingConnection, message, force);
+        }
+
+        static void ShowWaitingForConnection()
+        {
+            ShowStatus(DisplayState.WaitingConnection, "⚠️ esperando conexión...", force: true);
+        }
+
+        static void ShowNoData()
+        {
+            ShowStatus(DisplayState.NoData, "🔴 sin datos", force: true);
+        }
+
+        static void ShowStatus(DisplayState state, string message, bool force = false)
+        {
+            var now = DateTime.UtcNow;
+            var color = GetStateColor(state);
+
+            if (!force && lastDisplayState == DisplayState.Synced && state != DisplayState.Synced)
+            {
+                return;
+            }
+
+            if (!force && message == lastDisplayedLine && lastDisplayState == state && lastDisplayColor == color)
+            {
+                lastDisplayRenderUtc = now;
+                if (state == DisplayState.NoData)
+                {
+                    lastFlightDataUtc = DateTime.MinValue;
+                }
+                return;
+            }
+
+            if (!force && now - lastDisplayRenderUtc < displayUpdateInterval && message == lastDisplayedLine)
+            {
+                return;
+            }
+
+            RenderDisplayLine(message, state, color, now);
+
+            if (state == DisplayState.NoData)
+            {
+                lastFlightDataUtc = DateTime.MinValue;
+            }
+        }
+
+        static void RenderDisplayLine(string text, DisplayState state, ConsoleColor color, DateTime timestamp)
+        {
+            lock (displayLock)
+            {
+                if (dataDisplayLine == -1 || dataDisplayLine >= SafeConsoleHeight())
+                {
+                    Console.WriteLine();
+                    dataDisplayLine = Console.CursorTop - 1;
+                }
+
+                int previousLeft = Console.CursorLeft;
+                int previousTop = Console.CursorTop;
+
+                Console.SetCursorPosition(0, Math.Max(0, dataDisplayLine));
+
+                var originalColor = Console.ForegroundColor;
+                Console.ForegroundColor = color;
+
+                int width = SafeConsoleWidth();
+                if (width <= 1)
+                {
+                    width = text.Length + 1;
+                }
+
+                string output = text.Length >= width
+                    ? text.Substring(0, Math.Max(0, width - 1))
+                    : text.PadRight(width - 1);
+
+                Console.Write(output);
+                Console.ForegroundColor = originalColor;
+
+                lastDisplayedLine = text;
+                lastDisplayColor = color;
+                lastDisplayState = state;
+                lastDisplayRenderUtc = timestamp;
+
+                if (previousTop != dataDisplayLine)
+                {
+                    Console.SetCursorPosition(previousLeft, previousTop);
+                }
+                else
+                {
+                    int nextLine = Math.Min(dataDisplayLine + 1, SafeConsoleHeight() - 1);
+                    Console.SetCursorPosition(0, Math.Max(0, nextLine));
+                }
+            }
+        }
+
+        static ConsoleColor GetStateColor(DisplayState state) => state switch
+        {
+            DisplayState.Synced => ConsoleColor.Green,
+            DisplayState.WaitingConnection => ConsoleColor.Yellow,
+            DisplayState.NoData => ConsoleColor.DarkGray,
+            _ => ConsoleColor.White
+        };
+
+        static void EnsureDisplayFreshness()
+        {
+            if (lastFlightDataUtc == DateTime.MinValue)
+            {
+                return;
+            }
+
+            if (lastDisplayState != DisplayState.NoData && DateTime.UtcNow - lastFlightDataUtc > displayTimeout)
+            {
+                ShowNoData();
+            }
+        }
+
+        static bool HasMeaningfulFlightValues(params double[] values)
+        {
+            const double tolerance = 0.0001;
+
+            foreach (double value in values)
+            {
+                if (Math.Abs(value) > tolerance)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        static bool TryParseFlightPayload(string message, out FlightDataPayload? payload)
+        {
+            payload = null;
+
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return false;
+            }
+
+            string trimmed = message.Trim();
+            if (!trimmed.StartsWith("{", StringComparison.Ordinal))
+            {
+                return false;
+            }
+
+            try
+            {
+                using var document = JsonDocument.Parse(trimmed);
+                if (document.RootElement.ValueKind != JsonValueKind.Object)
+                {
+                    return false;
+                }
+
+                var enumerator = document.RootElement.EnumerateObject();
+                if (!enumerator.MoveNext())
+                {
+                    return false;
+                }
+
+                payload = JsonSerializer.Deserialize<FlightDataPayload>(document.RootElement.GetRawText(), flightDataJsonOptions);
+                return payload != null;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        static int SafeConsoleWidth()
+        {
+            try
+            {
+                return Console.BufferWidth;
+            }
+            catch (System.IO.IOException)
+            {
+                return 120;
+            }
+        }
+
+        static int SafeConsoleHeight()
+        {
+            try
+            {
+                return Console.BufferHeight;
+            }
+            catch (System.IO.IOException)
+            {
+                return int.MaxValue;
+            }
+        }
+
+        sealed class FlightDataPayload
+        {
+            public AttitudePayload? Attitude { get; set; }
+            public PositionPayload? Position { get; set; }
+            public SpeedPayload? Speed { get; set; }
+            public ControlsPayload? Controls { get; set; }
+            public CabinPayload? Cabin { get; set; }
+            public DoorsPayload? Doors { get; set; }
+            public GroundPayload? Ground { get; set; }
+        }
+
+        sealed class AttitudePayload
+        {
+            public double Pitch { get; set; }
+            public double Bank { get; set; }
+            public double Heading { get; set; }
+        }
+
+        sealed class PositionPayload
+        {
+            public double Latitude { get; set; }
+            public double Longitude { get; set; }
+            public double Altitude { get; set; }
+        }
+
+        sealed class SpeedPayload
+        {
+            public double IndicatedAirspeed { get; set; }
+            public double VerticalSpeed { get; set; }
+            public double GroundSpeed { get; set; }
+        }
+
+        sealed class ControlsPayload
+        {
+            public double Throttle { get; set; }
+            public double Flaps { get; set; }
+            public double Elevator { get; set; }
+            public double Aileron { get; set; }
+            public double Rudder { get; set; }
+            public double ParkingBrake { get; set; }
+        }
+
+        sealed class CabinPayload
+        {
+            public bool LandingGearDown { get; set; }
+            public bool SpoilersDeployed { get; set; }
+            public bool AutopilotOn { get; set; }
+            public double AutopilotAltitude { get; set; }
+            public double AutopilotHeading { get; set; }
+        }
+
+        sealed class DoorsPayload
+        {
+            public bool DoorLeftOpen { get; set; }
+            public bool DoorRightOpen { get; set; }
+            public bool CargoDoorOpen { get; set; }
+            public bool RampOpen { get; set; }
+        }
+
+        sealed class GroundPayload
+        {
+            public bool CateringTruckPresent { get; set; }
+            public bool BaggageCartsPresent { get; set; }
+            public bool FuelTruckPresent { get; set; }
+        }
 
         // ---- DEFINICIONES DE SIMCONNECT ----
         static bool AddAttitudeDefinition() => RegisterDefinitionGroup<AttitudeStruct>(
@@ -583,33 +1085,42 @@ namespace SharedCockpitClient
             {
                 case DATA_REQUESTS.REQUEST_ATTITUDE:
                     var att = (AttitudeStruct)data.dwData[0];
-                    if (Math.Abs(att.Pitch - lastAttitude.Pitch) > 0.01 ||
+                    bool updateAttitude = !hasAttitudeData ||
+                        Math.Abs(att.Pitch - lastAttitude.Pitch) > 0.01 ||
                         Math.Abs(att.Bank - lastAttitude.Bank) > 0.01 ||
-                        Math.Abs(att.Heading - lastAttitude.Heading) > 0.01)
+                        Math.Abs(att.Heading - lastAttitude.Heading) > 0.01;
+                    if (updateAttitude)
                     {
                         lastAttitude = att;
+                        hasAttitudeData = true;
                         send = true;
                     }
                     break;
 
                 case DATA_REQUESTS.REQUEST_POSITION:
                     var pos = (PositionStruct)data.dwData[0];
-                    if (Math.Abs(pos.Latitude - lastPosition.Latitude) > 0.00001 ||
+                    bool updatePosition = !hasPositionData ||
+                        Math.Abs(pos.Latitude - lastPosition.Latitude) > 0.00001 ||
                         Math.Abs(pos.Longitude - lastPosition.Longitude) > 0.00001 ||
-                        Math.Abs(pos.Altitude - lastPosition.Altitude) > 0.1)
+                        Math.Abs(pos.Altitude - lastPosition.Altitude) > 0.1;
+                    if (updatePosition)
                     {
                         lastPosition = pos;
+                        hasPositionData = true;
                         send = true;
                     }
                     break;
 
                 case DATA_REQUESTS.REQUEST_SPEED:
                     var spd = (SpeedStruct)data.dwData[0];
-                    if (Math.Abs(spd.IndicatedAirspeed - lastSpeed.IndicatedAirspeed) > 0.1 ||
+                    bool updateSpeed = !hasSpeedData ||
+                        Math.Abs(spd.IndicatedAirspeed - lastSpeed.IndicatedAirspeed) > 0.1 ||
                         Math.Abs(spd.VerticalSpeed - lastSpeed.VerticalSpeed) > 1 ||
-                        Math.Abs(spd.GroundSpeed - lastSpeed.GroundSpeed) > 0.1)
+                        Math.Abs(spd.GroundSpeed - lastSpeed.GroundSpeed) > 0.1;
+                    if (updateSpeed)
                     {
                         lastSpeed = spd;
+                        hasSpeedData = true;
                         send = true;
                     }
                     break;
@@ -670,7 +1181,21 @@ namespace SharedCockpitClient
                     break;
             }
 
-            if (send)
+            bool hasPrimaryData = hasAttitudeData && hasPositionData && hasSpeedData;
+
+            if (isHost && hasPrimaryData)
+            {
+                UpdateFlightDisplay(
+                    lastSpeed.IndicatedAirspeed,
+                    lastSpeed.VerticalSpeed,
+                    lastSpeed.GroundSpeed,
+                    lastPosition.Altitude,
+                    lastAttitude.Heading,
+                    lastPosition.Latitude,
+                    lastPosition.Longitude);
+            }
+
+            if (send && hasPrimaryData)
             {
                 var json = JsonSerializer.Serialize(new
                 {
@@ -683,7 +1208,71 @@ namespace SharedCockpitClient
                     ground = lastGround
                 });
 
-                SendToPeers(json);
+                QueueBroadcast(json);
+            }
+        }
+
+        static void QueueBroadcast(string payload)
+        {
+            string? immediatePayload = null;
+
+            lock (broadcastLock)
+            {
+                var now = DateTime.UtcNow;
+
+                if (now < suppressBroadcastUntilUtc)
+                {
+                    pendingBroadcastPayload = payload;
+                    return;
+                }
+
+                if (now - lastBroadcastUtc < broadcastInterval)
+                {
+                    pendingBroadcastPayload = payload;
+                    return;
+                }
+
+                pendingBroadcastPayload = null;
+                lastBroadcastUtc = now;
+                immediatePayload = payload;
+            }
+
+            if (immediatePayload != null)
+            {
+                SendToPeers(immediatePayload);
+            }
+        }
+
+        static void FlushPendingBroadcast()
+        {
+            string? payloadToSend = null;
+
+            lock (broadcastLock)
+            {
+                if (pendingBroadcastPayload == null)
+                {
+                    return;
+                }
+
+                var now = DateTime.UtcNow;
+                if (now < suppressBroadcastUntilUtc)
+                {
+                    return;
+                }
+
+                if (now - lastBroadcastUtc < broadcastInterval)
+                {
+                    return;
+                }
+
+                payloadToSend = pendingBroadcastPayload;
+                pendingBroadcastPayload = null;
+                lastBroadcastUtc = now;
+            }
+
+            if (payloadToSend != null)
+            {
+                SendToPeers(payloadToSend);
             }
         }
 
@@ -694,7 +1283,6 @@ namespace SharedCockpitClient
                 if (hostServer != null && hostServer.HasClients)
                 {
                     hostServer.Broadcast(payload);
-                    Console.WriteLine("[C#] Datos enviados al/los copiloto(s): " + payload);
                     warnedNoConnection = false;
                 }
                 else if (!warnedNoConnection)
@@ -708,7 +1296,6 @@ namespace SharedCockpitClient
                 if (ws != null)
                 {
                     ws.Send(payload);
-                    Console.WriteLine("[C#] Datos enviados al host: " + payload);
                     warnedNoConnection = false;
                 }
                 else if (!warnedNoConnection)
