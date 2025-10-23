@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using Microsoft.FlightSimulator.SimConnect;
@@ -7,8 +8,14 @@ namespace SharedCockpitClient
 {
     class Program
     {
+        // Estado general de red
+        static bool isHost = true;
+        static string webSocketUrl = "ws://localhost:8081";
+        static bool warnedNoConnection = false;
+
         // WebSocket y SimConnect
         static WebSocketManager? ws;
+        static WebSocketHost? hostServer;
         static SimConnect? simconnect;
 
         enum DEFINITIONS
@@ -145,15 +152,10 @@ namespace SharedCockpitClient
 
         static void Main()
         {
-            // Conexión WebSocket usando WebSocketManager
-            ws = new WebSocketManager("ws://localhost:8081");
-
-            // Suscripción a eventos
-            ws.OnOpen += () => Console.WriteLine("🌐 Conectado al helper Node.js");
-            ws.OnError += (msg) => Console.WriteLine("⚠️ Error WebSocket: " + msg);
-
-            // Conectar
-            ws.Connect();
+            Console.OutputEncoding = Encoding.UTF8;
+            ConfigureMode();
+            SetupWebSocket();
+            SetupShutdownHandlers();
 
             // Conexión SimConnect
             simconnect = new SimConnect("SharedCockpitClient", IntPtr.Zero, 0, null, 0);
@@ -178,6 +180,92 @@ namespace SharedCockpitClient
                 simconnect?.ReceiveMessage();
                 Thread.Sleep(100); // 10Hz
             }
+        }
+
+        static void ConfigureMode()
+        {
+            Console.WriteLine("Selecciona modo de operación:");
+            Console.WriteLine("1) Host (piloto principal)");
+            Console.WriteLine("2) Cliente (copiloto)");
+            Console.Write("Opción [1]: ");
+
+            var option = Console.ReadLine();
+            isHost = option?.Trim() == "2" ? false : true;
+
+            if (isHost)
+            {
+                Console.WriteLine("➡️  Modo HOST seleccionado. Este equipo iniciará el servidor WebSocket en el puerto 8081.");
+                Console.WriteLine("   Pide al copiloto que se conecte a ws://<tu-ip>:8081");
+            }
+            else
+            {
+                Console.Write("IP o hostname del piloto principal [localhost]: ");
+                var hostInput = Console.ReadLine();
+                if (string.IsNullOrWhiteSpace(hostInput))
+                {
+                    hostInput = "localhost";
+                }
+
+                webSocketUrl = $"ws://{hostInput.Trim()}:8081";
+                Console.WriteLine($"➡️  Modo CLIENTE seleccionado. Intentando conectar a {webSocketUrl}");
+            }
+
+            Console.WriteLine();
+        }
+
+        static void SetupWebSocket()
+        {
+            if (isHost)
+            {
+                hostServer = new WebSocketHost(8081);
+                hostServer.OnClientConnected += () =>
+                {
+                    Console.WriteLine("✅ Copiloto conectado. Comenzaremos a enviar los datos de vuelo en cuanto cambien.");
+                    warnedNoConnection = false;
+                };
+                hostServer.OnClientDisconnected += () => Console.WriteLine("ℹ️ Copiloto desconectado del servidor.");
+                hostServer.OnMessage += OnWebSocketMessage;
+                hostServer.Start();
+            }
+            else
+            {
+                ws = new WebSocketManager(webSocketUrl);
+                ws.OnOpen += () =>
+                {
+                    Console.WriteLine("🌐 Conectado al piloto principal.");
+                    warnedNoConnection = false;
+                };
+                ws.OnError += (msg) => Console.WriteLine("⚠️ Error WebSocket: " + msg);
+                ws.OnClose += () => Console.WriteLine("🔌 Conexión WebSocket cerrada");
+                ws.OnMessage += OnWebSocketMessage;
+                ws.Connect();
+            }
+
+            Console.WriteLine("Presiona Ctrl+C para cerrar la aplicación.");
+        }
+
+        static void SetupShutdownHandlers()
+        {
+            Console.CancelKeyPress += (_, e) =>
+            {
+                e.Cancel = true;
+                Shutdown();
+                Environment.Exit(0);
+            };
+
+            AppDomain.CurrentDomain.ProcessExit += (_, __) => Shutdown();
+        }
+
+        static void Shutdown()
+        {
+            ws?.Close();
+            hostServer?.Stop();
+            simconnect?.Dispose();
+        }
+
+        static void OnWebSocketMessage(string message)
+        {
+            Console.WriteLine($"📨 Datos recibidos por WebSocket: {message}");
         }
 
         // ---- DEFINICIONES DE SIMCONNECT ----
@@ -346,7 +434,7 @@ namespace SharedCockpitClient
                     break;
             }
 
-            if (send && ws != null)
+            if (send)
             {
                 var json = JsonSerializer.Serialize(new
                 {
@@ -359,13 +447,40 @@ namespace SharedCockpitClient
                     ground = lastGround
                 });
 
-                ws.Send(json);
-                Console.WriteLine("[C#] Datos enviados: " + json);
+                SendToPeers(json);
             }
+        }
 
-            // 👇 Mantener la consola abierta hasta que el usuario presione una tecla
-            Console.WriteLine("\nPresiona ENTER para cerrar...");
-            Console.ReadLine();
+        static void SendToPeers(string payload)
+        {
+            if (isHost)
+            {
+                if (hostServer != null && hostServer.HasClients)
+                {
+                    hostServer.Broadcast(payload);
+                    Console.WriteLine("[C#] Datos enviados al/los copiloto(s): " + payload);
+                    warnedNoConnection = false;
+                }
+                else if (!warnedNoConnection)
+                {
+                    Console.WriteLine("⌛ Aún no hay copilotos conectados. Los datos se enviarán automáticamente en cuanto se unan.");
+                    warnedNoConnection = true;
+                }
+            }
+            else
+            {
+                if (ws != null)
+                {
+                    ws.Send(payload);
+                    Console.WriteLine("[C#] Datos enviados al host: " + payload);
+                    warnedNoConnection = false;
+                }
+                else if (!warnedNoConnection)
+                {
+                    Console.WriteLine("⚠️ No se puede enviar datos porque el WebSocket no está conectado.");
+                    warnedNoConnection = true;
+                }
+            }
         }
     }
 }
