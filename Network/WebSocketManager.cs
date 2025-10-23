@@ -1,69 +1,68 @@
 using System;
-using SharedCockpitClient.Utils;
 using WebSocketSharp;
 
-namespace SharedCockpitClient.Network;
-
-public class WebSocketManager
+namespace SharedCockpitClient.Network
 {
-    private WebSocket? ws; // ✅ Nullable: se inicializa en Connect()
-    private readonly string url;
-
-    public event Action OnOpen = delegate { };
-    public event Action<string> OnMessage = delegate { };
-    public event Action<string> OnError = delegate { };
-    public event Action OnClose = delegate { };
-
-    public WebSocketManager(string serverUrl)
+    public class WebSocketManager
     {
-        url = serverUrl ?? throw new ArgumentNullException(nameof(serverUrl));
-    }
+        private WebSocket? ws; // ✅ Nullable: se inicializa en Connect()
+        private readonly string url;
 
-    public void Connect()
-    {
-        try
+        public event Action? OnOpen;
+        public event Action<string>? OnMessage;
+        public event Action<string>? OnError;
+        public event Action? OnClose;
+
+        public WebSocketManager(string serverUrl)
         {
-            ws = new WebSocket(url);
-
-            ws.OnOpen += (sender, e) => OnOpen.Invoke();
-            ws.OnMessage += (sender, e) => OnMessage.Invoke(e.Data);
-            ws.OnError += (sender, e) => OnError.Invoke(e.Message);
-            ws.OnClose += (sender, e) => OnClose.Invoke();
-
-            ws.Connect();
-            Logger.Info($"Conectado al servidor WebSocket: {url}");
+            url = serverUrl ?? throw new ArgumentNullException(nameof(serverUrl));
         }
-        catch (Exception ex)
-        {
-            Logger.Error($"Error al conectar WebSocket: {ex.Message}");
-            OnError.Invoke(ex.Message);
-        }
-    }
 
-    public void Send(string message)
-    {
-        if (ws != null && ws.IsAlive)
-        {
-            ws.Send(message);
-        }
-        else
-        {
-            Logger.Warn("No se puede enviar el mensaje: WebSocket no está conectado o es nulo.");
-        }
-    }
-
-    public void Close()
-    {
-        if (ws != null)
+        public void Connect()
         {
             try
             {
-                ws.Close();
-                Logger.Info("Conexión WebSocket cerrada correctamente.");
+                ws = new WebSocket(url);
+
+                ws.OnOpen += (_, _) => OnOpen?.Invoke();
+                ws.OnMessage += (_, e) => OnMessage?.Invoke(e.Data);
+                ws.OnError += (_, e) => OnError?.Invoke(e.Message);
+                ws.OnClose += (_, _) => OnClose?.Invoke();
+
+                ws.Connect();
+                SharedCockpitClient.Utils.Logger.Info($"🌐 Conectado al servidor WebSocket: {url}");
             }
             catch (Exception ex)
             {
-                Logger.Warn($"Error al cerrar WebSocket: {ex.Message}");
+                SharedCockpitClient.Utils.Logger.Error($"❌ Error al conectar WebSocket: {ex.Message}");
+                OnError?.Invoke(ex.Message);
+            }
+        }
+
+        public void Send(string message)
+        {
+            if (ws is { IsAlive: true })
+            {
+                ws.Send(message);
+            }
+            else
+            {
+                SharedCockpitClient.Utils.Logger.Warn("⚠️ No se puede enviar el mensaje: WebSocket no está conectado o es nulo.");
+            }
+        }
+
+        public void Close()
+        {
+            if (ws == null) return;
+
+            try
+            {
+                ws.Close();
+                SharedCockpitClient.Utils.Logger.Info("🔌 Conexión WebSocket cerrada correctamente.");
+            }
+            catch (Exception ex)
+            {
+                SharedCockpitClient.Utils.Logger.Warn($"⚠️ Error al cerrar WebSocket: {ex.Message}");
             }
         }
     }
