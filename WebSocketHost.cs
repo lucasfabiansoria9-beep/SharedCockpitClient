@@ -92,7 +92,7 @@ namespace SharedCockpitClient
                 parent.OnMessage.Invoke(e.Data);
             }
 
-            protected override void OnError(ErrorEventArgs e)
+            protected override void OnError(WebSocketSharp.ErrorEventArgs e)
             {
                 base.OnError(e);
                 Console.WriteLine($"⚠️ Error en servidor WebSocket: {e.Message}");
