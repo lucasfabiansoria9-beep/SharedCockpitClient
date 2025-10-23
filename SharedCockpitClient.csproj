@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
@@ -28,7 +28,7 @@
     <PackageReference Include="WebSocketSharp.NetCore" Version="1.0.1-alpha.4" />
   </ItemGroup>
 
-  <ItemGroup>    
+  <ItemGroup>
     <Content Include="libs\Microsoft.FlightSimulator.SimConnect.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
@@ -38,4 +38,17 @@
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
+
+  <Target Name="CopyBuildOutputToPublish" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
+    <PropertyGroup>
+      <PublishOutputDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishOutputDir>
+    </PropertyGroup>
+    <ItemGroup>
+      <BuildArtifacts Include="$(TargetDir)**\*.*" Exclude="$(PublishOutputDir)**\*.*" />
+    </ItemGroup>
+    <MakeDir Directories="$(PublishOutputDir)" />
+    <Copy SourceFiles="@(BuildArtifacts)"
+          DestinationFiles="@(BuildArtifacts->'$(PublishOutputDir)%(RecursiveDir)%(Filename)%(Extension)')"
+          SkipUnchangedFiles="true" />
+  </Target>
 </Project>
