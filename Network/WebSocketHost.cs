@@ -1,14 +1,18 @@
 using System;
+using SharedCockpitClient.Utils;
 using WebSocketSharp;
 using WebSocketSharp.Server;
-using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network;
 
+/// <summary>
+/// Servidor WebSocket sencillo que acepta conexiones entrantes del copiloto.
+/// Permite enviar mensajes a todos los clientes conectados y expone eventos
+/// para reaccionar a la conexión, desconexión y mensajes recibidos.
+/// </summary>
 public sealed class WebSocketHost : IDisposable
 {
-    private readonly WebSocketServer _server;
-    private bool _disposed;
+    private readonly WebSocketServer server;
 
     public event Action OnClientConnected = delegate { };
     public event Action OnClientDisconnected = delegate { };
@@ -16,102 +20,80 @@ public sealed class WebSocketHost : IDisposable
 
     public WebSocketHost(int port)
     {
-        _server = new WebSocketServer(System.Net.IPAddress.Any, port);
-        _server.AddWebSocketService("/", () => new HostBehavior(this));
+        server = new WebSocketServer(System.Net.IPAddress.Any, port);
+        server.AddWebSocketService("/", () => new HostBehavior(this));
+    }
+
+    public void Start()
+    {
+        if (!server.IsListening)
+        {
+            server.Start();
+            Logger.Info($"🛰️ Servidor WebSocket activo en ws://0.0.0.0:{server.Port}");
+        }
+    }
+
+    public void Stop()
+    {
+        if (server.IsListening)
+        {
+            server.Stop();
+            Logger.Info("🛑 Servidor WebSocket detenido.");
+        }
     }
 
     public bool HasClients
     {
         get
         {
-            if (!_server.IsListening)
-            {
-                return false;
-            }
-
-            var service = _server.WebSocketServices["/"];
-            return service?.Sessions?.Count > 0;
+            if (!server.IsListening) return false;
+            var host = server.WebSocketServices["/"];
+            return host?.Sessions?.Count > 0;
         }
-    }
-
-    public void Start()
-    {
-        if (_disposed)
-        {
-            return;
-        }
-
-        if (_server.IsListening)
-        {
-            return;
-        }
-
-        _server.Start();
-        Logger.Info($"🛰️ Servidor WebSocket activo en ws://0.0.0.0:{_server.Port}");
     }
 
     public void Broadcast(string message)
     {
-        if (!_server.IsListening)
-        {
-            return;
-        }
+        if (!server.IsListening) return;
 
-        var service = _server.WebSocketServices["/"];
-        service?.Sessions?.Broadcast(message);
-    }
-
-    public void Stop()
-    {
-        if (!_server.IsListening)
-        {
-            return;
-        }
-
-        _server.Stop();
-        Logger.Warn("🛑 Servidor WebSocket detenido");
+        var host = server.WebSocketServices["/"];
+        host?.Sessions?.Broadcast(message);
     }
 
     public void Dispose()
     {
-        if (_disposed)
-        {
-            return;
-        }
-
-        _disposed = true;
         Stop();
     }
 
     private sealed class HostBehavior : WebSocketBehavior
     {
-        private readonly WebSocketHost _parent;
+        private readonly WebSocketHost parent;
 
         public HostBehavior(WebSocketHost parent)
         {
-            _parent = parent;
+            this.parent = parent;
         }
 
         protected override void OnOpen()
         {
             base.OnOpen();
-            Logger.Info("👥 Copiloto conectado");
-            _parent.OnClientConnected.Invoke();
+            Logger.Info("👥 Copiloto conectado al servidor WebSocket.");
+            parent.OnClientConnected.Invoke();
         }
 
         protected override void OnClose(CloseEventArgs e)
         {
             base.OnClose(e);
-            Logger.Warn("👋 Copiloto desconectado");
-            _parent.OnClientDisconnected.Invoke();
+            Logger.Info("👋 Copiloto desconectado del servidor WebSocket.");
+            parent.OnClientDisconnected.Invoke();
         }
 
         protected override void OnMessage(MessageEventArgs e)
         {
-            _parent.OnMessage.Invoke(e.Data);
+            parent.OnMessage.Invoke(e.Data);
         }
 
-        protected override void OnError(ErrorEventArgs e)
+        protected override void OnError(WebSocketSharp.ErrorEventArgs e)
         {
             base.OnError(e);
             Logger.Warn($"⚠️ Error en servidor WebSocket: {e.Message}");

@@ -1,4 +1,5 @@
 using System;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using SharedCockpitClient.FlightData;
@@ -8,79 +9,56 @@ namespace SharedCockpitClient.Network;
 
 public sealed class SyncController : IDisposable
 {
-    private readonly SimConnectManager _sim;
-    private readonly object _broadcastLock = new();
-    private readonly TimeSpan _broadcastInterval = TimeSpan.FromMilliseconds(100);
+    private readonly SimConnectManager sim;
 
-    private WebSocketHost? _host;
-    private WebSocketManager? _client;
+    private bool isHost = true;
+    private string webSocketUrl = "ws://localhost:8081";
+    private bool warnedNoConnection;
 
-    private bool _isHost = true;
-    private string _webSocketUrl = "ws://localhost:8081";
-
-    private string? _pendingPayload;
-    private DateTime _lastBroadcastUtc = DateTime.MinValue;
-    private DateTime _suppressBroadcastUntilUtc = DateTime.MinValue;
-
-    private FlightSnapshot? _lastSentSnapshot;
-    private FlightSnapshot? _lastRemoteSnapshot;
-    private FlightSnapshot? _lastLocalSnapshot;
-
-    private DateTime _lastRemoteUtc = DateTime.MinValue;
-    private bool _remoteConnected;
-    private bool _latencyWarned;
-    private bool _disposed;
+    private WebSocketManager? ws;
+    private WebSocketHost? hostServer;
+    private CancellationTokenSource? loopToken;
 
     public SyncController(SimConnectManager sim)
     {
-        _sim = sim ?? throw new ArgumentNullException(nameof(sim));
-        _sim.OnFlightDataUpdated += HandleLocalFlightData;
+        this.sim = sim ?? throw new ArgumentNullException(nameof(sim));
+        this.sim.OnFlightDataReady += HandleFlightDataReady;
     }
 
     public async Task RunAsync()
     {
-        FlightDisplay.Initialize();
+        Console.OutputEncoding = Encoding.UTF8;
+
         ConfigureMode();
-        FlightDisplay.ShowWaiting("⚠️ esperando datos...");
+        SetupWebSocket();
+        SetupShutdownHandlers();
 
-        using var cts = new CancellationTokenSource();
-
-        Console.CancelKeyPress += (_, e) =>
-        {
-            e.Cancel = true;
-            cts.Cancel();
-        };
-
-        AppDomain.CurrentDomain.ProcessExit += (_, __) => cts.Cancel();
-
-        var simTask = _sim.StartListeningAsync(cts.Token);
-        var wsTask = ListenWebSocketAsync(cts.Token);
-
-        try
-        {
-            await Task.WhenAll(simTask, wsTask).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            // Expected on shutdown
-        }
-        finally
-        {
-            Dispose();
-        }
-    }
-
-    public void Dispose()
-    {
-        if (_disposed)
+        if (!sim.Initialize())
         {
             return;
         }
 
-        _disposed = true;
-        _host?.Dispose();
-        _client?.Dispose();
-        _sim.Dispose();
+        Logger.Info("Presiona Ctrl+C para cerrar la aplicación.");
+
+        using var cts = new CancellationTokenSource();
+        loopToken = cts;
+
+        try
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                sim.ReceiveMessage();
+                await Task.Delay(100, cts.Token);
+            }
+        }
+        catch (TaskCanceledException)
+        {
+            // Ignorado: la cancelación es el flujo esperado al cerrar la aplicación.
+        }
+        finally
+        {
+            loopToken = null;
+        }
     }
 
     private void ConfigureMode()
@@ -88,281 +66,128 @@ public sealed class SyncController : IDisposable
         Logger.Info("Selecciona modo de operación:");
         Logger.Info("1) Host (piloto principal)");
         Logger.Info("2) Cliente (copiloto)");
-        Console.Write("Opción [1]: ");
-        var option = Console.ReadLine();
-        _isHost = option?.Trim() != "2";
+        Console.Write("Opcin [1]: ");
 
-        if (_isHost)
+        var option = Console.ReadLine();
+        isHost = option?.Trim() == "2" ? false : true;
+
+        if (isHost)
         {
-            Logger.Info("➡️  Modo HOST seleccionado. Se iniciará el servidor en el puerto 8081.");
-            StartHost();
+            Logger.Info("➡️  Modo HOST seleccionado. Este equipo iniciará el servidor WebSocket en el puerto 8081.");
+            Logger.Info("   Pide al copiloto que se conecte a ws://<tu-ip>:8081");
         }
         else
         {
-            Console.Write("IP o hostname del host [localhost]: ");
+            Console.Write("IP o hostname del piloto principal [localhost]: ");
             var hostInput = Console.ReadLine();
             if (string.IsNullOrWhiteSpace(hostInput))
             {
                 hostInput = "localhost";
             }
 
-            _webSocketUrl = $"ws://{hostInput.Trim()}:8081";
-            Logger.Info($"➡️  Modo CLIENTE seleccionado. Intentando conectar a {_webSocketUrl}");
-            StartClient();
+            webSocketUrl = $"ws://{hostInput.Trim()}:8081";
+            Logger.Info($"➡️  Modo CLIENTE seleccionado. Intentando conectar a {webSocketUrl}");
         }
 
-        Console.WriteLine();
-        Logger.Info("Presiona Ctrl+C para cerrar la aplicación.");
+        Logger.Info(string.Empty);
     }
 
-    private void StartHost()
+    private void SetupWebSocket()
     {
-        _host = new WebSocketHost(8081);
-        _host.OnClientConnected += () =>
+        if (isHost)
         {
-            _remoteConnected = true;
-            _latencyWarned = false;
-            FlightDisplay.ShowWaiting("⚠️ esperando datos remotos...");
-        };
-        _host.OnClientDisconnected += () =>
-        {
-            _remoteConnected = false;
-            _latencyWarned = false;
-            FlightDisplay.ShowWaiting("⚠️ esperando copiloto...");
-        };
-        _host.OnMessage += HandleRemoteMessage;
-        _host.Start();
-    }
-
-    private void StartClient()
-    {
-        _client = new WebSocketManager(_webSocketUrl);
-        _client.OnOpen += () =>
-        {
-            _remoteConnected = true;
-            _latencyWarned = false;
-            FlightDisplay.ShowWaiting("⚠️ esperando datos del host...");
-        };
-        _client.OnClose += () =>
-        {
-            _remoteConnected = false;
-            FlightDisplay.ShowWaiting("⚠️ reconectando...");
-        };
-        _client.OnError += _ => FlightDisplay.ShowWaiting("⚠️ error de red, reintentando...");
-        _client.OnMessage += HandleRemoteMessage;
-        _client.Connect();
-    }
-
-    private void HandleLocalFlightData(FlightSnapshot snapshot)
-    {
-        _lastLocalSnapshot = snapshot;
-
-        bool showLocal = _isHost || !_lastRemoteUtc.IsRecent(0.5);
-        bool inSync = _remoteConnected && (!_isHost || _host?.HasClients == true) && (_isHost || _client?.IsConnected == true);
-
-        if (showLocal)
-        {
-            FlightDisplay.ShowFlightData(snapshot, inSync);
-        }
-
-        if (!_remoteConnected)
-        {
-            return;
-        }
-
-        if (!snapshot.HasPrimaryFlightValues())
-        {
-            return;
-        }
-
-        if (!snapshot.IsMeaningfullyDifferent(_lastSentSnapshot, 0.002))
-        {
-            return;
-        }
-
-        QueueBroadcast(snapshot);
-        _lastSentSnapshot = new FlightSnapshot
-        {
-            Attitude = snapshot.Attitude,
-            Position = snapshot.Position,
-            Speed = snapshot.Speed,
-            Controls = snapshot.Controls,
-            Cabin = snapshot.Cabin,
-            Doors = snapshot.Doors,
-            Ground = snapshot.Ground,
-            Timestamp = snapshot.Timestamp
-        };
-    }
-
-    private void HandleRemoteMessage(string message)
-    {
-        if (!FlightSnapshot.TryFromJson(message, out var snapshot) || snapshot == null)
-        {
-            return;
-        }
-
-        if (!snapshot.HasPrimaryFlightValues())
-        {
-            return;
-        }
-
-        snapshot.Timestamp = DateTime.UtcNow;
-        _lastRemoteSnapshot = snapshot;
-        _lastRemoteUtc = snapshot.Timestamp;
-        _remoteConnected = true;
-        _latencyWarned = false;
-        _suppressBroadcastUntilUtc = DateTime.UtcNow.AddMilliseconds(200);
-
-        if (!_isHost)
-        {
-            FlightDisplay.ShowFlightData(snapshot, true);
+            hostServer = new WebSocketHost(8081);
+            hostServer.OnClientConnected += () =>
+            {
+                Logger.Info("✅ Copiloto conectado. Comenzaremos a enviar los datos de vuelo en cuanto cambien.");
+                warnedNoConnection = false;
+            };
+            hostServer.OnClientDisconnected += () => Logger.Info("ℹ️ Copiloto desconectado del servidor.");
+            hostServer.OnMessage += OnWebSocketMessage;
+            hostServer.Start();
         }
         else
         {
-            Logger.Debug("Datos recibidos del copiloto");
-            bool localRecent = _lastLocalSnapshot != null && _lastLocalSnapshot.Timestamp.IsRecent(0.5);
-            if (!localRecent)
+            ws = new WebSocketManager(webSocketUrl);
+            ws.OnOpen += () =>
             {
-                FlightDisplay.ShowFlightData(snapshot, true);
-            }
+                Logger.Info("🌐 Conectado al piloto principal.");
+                warnedNoConnection = false;
+            };
+            ws.OnError += (msg) => Logger.Warn("⚠️ Error WebSocket: " + msg);
+            ws.OnClose += () => Logger.Info("🔌 Conexión WebSocket cerrada");
+            ws.OnMessage += OnWebSocketMessage;
+            ws.Connect();
         }
     }
 
-    private void QueueBroadcast(FlightSnapshot snapshot)
+    private void SetupShutdownHandlers()
     {
-        string payload = snapshot.ToJson();
-        lock (_broadcastLock)
+        Console.CancelKeyPress += (_, e) =>
         {
-            var now = DateTime.UtcNow;
-            if (now < _suppressBroadcastUntilUtc)
-            {
-                _pendingPayload = payload;
-                return;
-            }
+            e.Cancel = true;
+            Shutdown();
+            loopToken?.Cancel();
+            Environment.Exit(0);
+        };
 
-            if (now - _lastBroadcastUtc < _broadcastInterval)
-            {
-                _pendingPayload = payload;
-                return;
-            }
-
-            _pendingPayload = null;
-            _lastBroadcastUtc = now;
-            SendPayload(payload);
-        }
+        AppDomain.CurrentDomain.ProcessExit += (_, __) => Shutdown();
     }
 
-    private void FlushPendingBroadcast()
+    private void OnWebSocketMessage(string message)
     {
-        string? payload = null;
-
-        lock (_broadcastLock)
-        {
-            if (_pendingPayload == null)
-            {
-                return;
-            }
-
-            var now = DateTime.UtcNow;
-            if (now < _suppressBroadcastUntilUtc)
-            {
-                return;
-            }
-
-            if (now - _lastBroadcastUtc < _broadcastInterval)
-            {
-                return;
-            }
-
-            payload = _pendingPayload;
-            _pendingPayload = null;
-            _lastBroadcastUtc = now;
-        }
-
-        if (payload != null)
-        {
-            SendPayload(payload);
-        }
+        FlightDisplay.ShowReceivedMessage(message);
     }
 
-    private void SendPayload(string payload)
+    private void HandleFlightDataReady(string payload)
     {
-        if (_isHost)
+        SendToPeers(payload);
+    }
+
+    private void SendToPeers(string payload)
+    {
+        if (isHost)
         {
-            if (_host?.HasClients == true)
+            if (hostServer != null && hostServer.HasClients)
             {
-                _host.Broadcast(payload);
+                hostServer.Broadcast(payload);
+                FlightDisplay.ShowSentToCopilot(payload);
+                warnedNoConnection = false;
             }
-            else if (_remoteConnected)
+            else if (!warnedNoConnection)
             {
-                _remoteConnected = false;
-                FlightDisplay.ShowWaiting("⚠️ esperando copiloto...");
+                Logger.Info("⌛ Aún no hay copilotos conectados. Los datos se enviarán automáticamente en cuanto se unan.");
+                warnedNoConnection = true;
             }
         }
         else
         {
-            if (_client?.IsConnected == true)
+            if (ws != null)
             {
-                _client.Send(payload);
+                ws.Send(payload);
+                FlightDisplay.ShowSentToHost(payload);
+                warnedNoConnection = false;
             }
-            else if (_remoteConnected)
+            else if (!warnedNoConnection)
             {
-                _remoteConnected = false;
-                FlightDisplay.ShowWaiting("⚠️ reconectando...");
-            }
-        }
-    }
-
-    private async Task ListenWebSocketAsync(CancellationToken token)
-    {
-        while (!token.IsCancellationRequested)
-        {
-            FlushPendingBroadcast();
-            MonitorLatency();
-
-            try
-            {
-                await Task.Delay(100, token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
+                Logger.Warn("⚠️ No se puede enviar datos porque el WebSocket no está conectado.");
+                warnedNoConnection = true;
             }
         }
     }
 
-    private void MonitorLatency()
+    private void Shutdown()
     {
-        var now = DateTime.UtcNow;
-        var lastDisplay = FlightDisplay.LastUpdateUtc;
+        ws?.Close();
+        hostServer?.Stop();
+        sim.Dispose();
+    }
 
-        if (lastDisplay != DateTime.MinValue)
-        {
-            var age = now - lastDisplay;
-            if (age > TimeSpan.FromSeconds(3))
-            {
-                FlightDisplay.ShowNoData();
-            }
-            else if (age > TimeSpan.FromSeconds(1))
-            {
-                FlightDisplay.ShowLagging(age);
-            }
-        }
-
-        if (_remoteConnected && _lastRemoteUtc != DateTime.MinValue)
-        {
-            if (now - _lastRemoteUtc > TimeSpan.FromSeconds(2))
-            {
-                if (!_latencyWarned)
-                {
-                    Logger.Warn("⚠️ Retraso o pérdida de sincronización...");
-                    _latencyWarned = true;
-                }
-            }
-            else
-            {
-                _latencyWarned = false;
-            }
-        }
+    public void Dispose()
+    {
+        sim.OnFlightDataReady -= HandleFlightDataReady;
+        Shutdown();
+        loopToken?.Cancel();
+        loopToken?.Dispose();
     }
 }

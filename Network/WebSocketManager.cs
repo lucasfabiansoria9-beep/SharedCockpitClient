@@ -1,109 +1,69 @@
 using System;
-using WebSocketSharp;
 using SharedCockpitClient.Utils;
+using WebSocketSharp;
 
 namespace SharedCockpitClient.Network;
 
-public sealed class WebSocketManager : IDisposable
+public class WebSocketManager
 {
-    private readonly string _url;
-    private WebSocket? _client;
-    private bool _disposed;
-    private readonly object _sync = new();
+    private WebSocket? ws; // ✅ Nullable: se inicializa en Connect()
+    private readonly string url;
 
     public event Action OnOpen = delegate { };
     public event Action<string> OnMessage = delegate { };
     public event Action<string> OnError = delegate { };
     public event Action OnClose = delegate { };
 
-    public bool IsConnected => _client?.IsAlive == true;
-
-    public WebSocketManager(string url)
+    public WebSocketManager(string serverUrl)
     {
-        _url = url ?? throw new ArgumentNullException(nameof(url));
+        url = serverUrl ?? throw new ArgumentNullException(nameof(serverUrl));
     }
 
     public void Connect()
     {
-        lock (_sync)
+        try
         {
-            if (_disposed)
-            {
-                return;
-            }
+            ws = new WebSocket(url);
 
-            if (_client != null)
-            {
-                return;
-            }
+            ws.OnOpen += (sender, e) => OnOpen.Invoke();
+            ws.OnMessage += (sender, e) => OnMessage.Invoke(e.Data);
+            ws.OnError += (sender, e) => OnError.Invoke(e.Message);
+            ws.OnClose += (sender, e) => OnClose.Invoke();
 
-            _client = new WebSocket(_url);
-            _client.OnOpen += (_, _) =>
-            {
-                Logger.Info($"🌐 Conectado al host {_url}");
-                OnOpen.Invoke();
-            };
-            _client.OnMessage += (_, e) => OnMessage.Invoke(e.Data);
-            _client.OnError += (_, e) =>
-            {
-                Logger.Warn($"⚠️ Error WebSocket: {e.Message}");
-                OnError.Invoke(e.Message);
-            };
-            _client.OnClose += (_, _) =>
-            {
-                Logger.Warn("🔌 Conexión WebSocket cerrada");
-                OnClose.Invoke();
-            };
-
-            try
-            {
-                _client.Connect();
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"❌ No se pudo conectar al host {_url}: {ex.Message}");
-                OnError.Invoke(ex.Message);
-            }
+            ws.Connect();
+            Logger.Info($"Conectado al servidor WebSocket: {url}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"Error al conectar WebSocket: {ex.Message}");
+            OnError.Invoke(ex.Message);
         }
     }
 
     public void Send(string message)
     {
-        lock (_sync)
+        if (ws != null && ws.IsAlive)
         {
-            if (_client?.IsAlive == true)
-            {
-                _client.Send(message);
-            }
-            else
-            {
-                Logger.Warn("⚠️ No se puede enviar: WebSocket desconectado");
-            }
+            ws.Send(message);
+        }
+        else
+        {
+            Logger.Warn("No se puede enviar el mensaje: WebSocket no está conectado o es nulo.");
         }
     }
 
-    public void Dispose()
+    public void Close()
     {
-        lock (_sync)
+        if (ws != null)
         {
-            if (_disposed)
+            try
             {
-                return;
+                ws.Close();
+                Logger.Info("Conexión WebSocket cerrada correctamente.");
             }
-
-            _disposed = true;
-            if (_client != null)
+            catch (Exception ex)
             {
-                try
-                {
-                    _client.Close();
-                }
-                catch
-                {
-                    // Ignored
-                }
-
-                _client = null;
+                Logger.Warn($"Error al cerrar WebSocket: {ex.Message}");
             }
         }
     }

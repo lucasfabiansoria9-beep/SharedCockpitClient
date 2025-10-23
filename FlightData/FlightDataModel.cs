@@ -1,224 +1,148 @@
 using System;
-using System.Runtime.InteropServices;
-using System.Text.Json;
-using System.Text.Json.Serialization;
-using SharedCockpitClient.Utils;
+using Microsoft.FlightSimulator.SimConnect;
 
 namespace SharedCockpitClient.FlightData;
 
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct AttitudeStruct
+public readonly struct AttitudeStruct
 {
-    [JsonPropertyName("Pitch")]
-    public double Pitch;
+    public readonly double Pitch;
+    public readonly double Bank;
+    public readonly double Heading;
 
-    [JsonPropertyName("Bank")]
-    public double Bank;
-
-    [JsonPropertyName("Heading")]
-    public double Heading;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct PositionStruct
-{
-    [JsonPropertyName("Latitude")]
-    public double Latitude;
-
-    [JsonPropertyName("Longitude")]
-    public double Longitude;
-
-    [JsonPropertyName("Altitude")]
-    public double Altitude;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct SpeedStruct
-{
-    [JsonPropertyName("IndicatedAirspeed")]
-    public double IndicatedAirspeed;
-
-    [JsonPropertyName("VerticalSpeed")]
-    public double VerticalSpeed;
-
-    [JsonPropertyName("GroundSpeed")]
-    public double GroundSpeed;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct ControlsStruct
-{
-    [JsonPropertyName("Throttle")]
-    public double Throttle;
-
-    [JsonPropertyName("Flaps")]
-    public double Flaps;
-
-    [JsonPropertyName("Elevator")]
-    public double Elevator;
-
-    [JsonPropertyName("Aileron")]
-    public double Aileron;
-
-    [JsonPropertyName("Rudder")]
-    public double Rudder;
-
-    [JsonPropertyName("ParkingBrake")]
-    public double ParkingBrake;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct CabinStruct
-{
-    [JsonPropertyName("LandingGearDown")]
-    public bool LandingGearDown;
-
-    [JsonPropertyName("SpoilersDeployed")]
-    public bool SpoilersDeployed;
-
-    [JsonPropertyName("AutopilotOn")]
-    public bool AutopilotOn;
-
-    [JsonPropertyName("AutopilotAltitude")]
-    public double AutopilotAltitude;
-
-    [JsonPropertyName("AutopilotHeading")]
-    public double AutopilotHeading;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct DoorsStruct
-{
-    [JsonPropertyName("DoorLeftOpen")]
-    public bool DoorLeftOpen;
-
-    [JsonPropertyName("DoorRightOpen")]
-    public bool DoorRightOpen;
-
-    [JsonPropertyName("CargoDoorOpen")]
-    public bool CargoDoorOpen;
-
-    [JsonPropertyName("RampOpen")]
-    public bool RampOpen;
-}
-
-[StructLayout(LayoutKind.Sequential, Pack = 1)]
-public struct GroundSupportStruct
-{
-    [JsonPropertyName("CateringTruckPresent")]
-    public bool CateringTruckPresent;
-
-    [JsonPropertyName("BaggageCartsPresent")]
-    public bool BaggageCartsPresent;
-
-    [JsonPropertyName("FuelTruckPresent")]
-    public bool FuelTruckPresent;
-}
-
-public class FlightSnapshot
-{
-    private static readonly JsonSerializerOptions SerializerOptions = new()
+    public AttitudeStruct(double pitch = 0, double bank = 0, double heading = 0)
     {
-        PropertyNamingPolicy = null,
-        PropertyNameCaseInsensitive = true,
-        IncludeFields = true
-    };
-
-    [JsonPropertyName("attitude")]
-    public AttitudeStruct Attitude { get; set; }
-
-    [JsonPropertyName("position")]
-    public PositionStruct Position { get; set; }
-
-    [JsonPropertyName("speed")]
-    public SpeedStruct Speed { get; set; }
-
-    [JsonPropertyName("controls")]
-    public ControlsStruct Controls { get; set; }
-
-    [JsonPropertyName("cabin")]
-    public CabinStruct Cabin { get; set; }
-
-    [JsonPropertyName("doors")]
-    public DoorsStruct Doors { get; set; }
-
-    [JsonPropertyName("ground")]
-    public GroundSupportStruct Ground { get; set; }
-
-    [JsonIgnore]
-    public DateTime Timestamp { get; set; } = DateTime.UtcNow;
-
-    public bool HasPrimaryFlightValues()
-    {
-        return Math.Abs(Speed.IndicatedAirspeed) > 0.01 ||
-               Math.Abs(Speed.VerticalSpeed) > 0.01 ||
-               Math.Abs(Speed.GroundSpeed) > 0.01 ||
-               Math.Abs(Position.Altitude) > 0.01 ||
-               Math.Abs(Position.Latitude) > 0.01 ||
-               Math.Abs(Position.Longitude) > 0.01 ||
-               Math.Abs(Attitude.Heading) > 0.01;
+        Pitch = pitch;
+        Bank = bank;
+        Heading = heading;
     }
+}
 
-    public string ToJson() => JsonSerializer.Serialize(this, SerializerOptions);
+public readonly struct PositionStruct
+{
+    public readonly double Latitude;
+    public readonly double Longitude;
+    public readonly double Altitude;
 
-    public static bool TryFromJson(string payload, out FlightSnapshot? snapshot)
+    public PositionStruct(double lat = 0, double lon = 0, double alt = 0)
     {
-        snapshot = null;
-        if (string.IsNullOrWhiteSpace(payload))
-        {
-            return false;
-        }
-
-        try
-        {
-            snapshot = JsonSerializer.Deserialize<FlightSnapshot>(payload, SerializerOptions);
-            if (snapshot != null)
-            {
-                snapshot.Timestamp = DateTime.UtcNow;
-            }
-
-            return snapshot != null;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
+        Latitude = lat;
+        Longitude = lon;
+        Altitude = alt;
     }
+}
 
-    public bool IsMeaningfullyDifferent(FlightSnapshot? other, double tolerance = 0.01)
+public readonly struct SpeedStruct
+{
+    public readonly double IndicatedAirspeed;
+    public readonly double VerticalSpeed;
+    public readonly double GroundSpeed;
+
+    public SpeedStruct(double ias = 0, double vs = 0, double gs = 0)
     {
-        if (other == null)
-        {
-            return true;
-        }
+        IndicatedAirspeed = ias;
+        VerticalSpeed = vs;
+        GroundSpeed = gs;
+    }
+}
 
-        var o = other!;
-        return Attitude.Pitch.IsDifferent(o.Attitude.Pitch, tolerance) ||
-               Attitude.Bank.IsDifferent(o.Attitude.Bank, tolerance) ||
-               Attitude.Heading.IsDifferent(o.Attitude.Heading, tolerance) ||
-               Position.Latitude.IsDifferent(o.Position.Latitude, tolerance) ||
-               Position.Longitude.IsDifferent(o.Position.Longitude, tolerance) ||
-               Position.Altitude.IsDifferent(o.Position.Altitude, tolerance) ||
-               Speed.IndicatedAirspeed.IsDifferent(o.Speed.IndicatedAirspeed, tolerance) ||
-               Speed.VerticalSpeed.IsDifferent(o.Speed.VerticalSpeed, tolerance) ||
-               Speed.GroundSpeed.IsDifferent(o.Speed.GroundSpeed, tolerance) ||
-               Controls.Throttle.IsDifferent(o.Controls.Throttle, tolerance) ||
-               Controls.Flaps.IsDifferent(o.Controls.Flaps, tolerance) ||
-               Controls.Elevator.IsDifferent(o.Controls.Elevator, tolerance) ||
-               Controls.Aileron.IsDifferent(o.Controls.Aileron, tolerance) ||
-               Controls.Rudder.IsDifferent(o.Controls.Rudder, tolerance) ||
-               Controls.ParkingBrake.IsDifferent(o.Controls.ParkingBrake, tolerance) ||
-               Cabin.AutopilotAltitude.IsDifferent(o.Cabin.AutopilotAltitude, tolerance) ||
-               Cabin.AutopilotHeading.IsDifferent(o.Cabin.AutopilotHeading, tolerance) ||
-               Cabin.AutopilotOn != o.Cabin.AutopilotOn ||
-               Cabin.LandingGearDown != o.Cabin.LandingGearDown ||
-               Cabin.SpoilersDeployed != o.Cabin.SpoilersDeployed ||
-               Doors.DoorLeftOpen != o.Doors.DoorLeftOpen ||
-               Doors.DoorRightOpen != o.Doors.DoorRightOpen ||
-               Doors.CargoDoorOpen != o.Doors.CargoDoorOpen ||
-               Doors.RampOpen != o.Doors.RampOpen ||
-               Ground.BaggageCartsPresent != o.Ground.BaggageCartsPresent ||
-               Ground.CateringTruckPresent != o.Ground.CateringTruckPresent ||
-               Ground.FuelTruckPresent != o.Ground.FuelTruckPresent;
+public readonly struct ControlsStruct
+{
+    public readonly double Throttle;
+    public readonly double Flaps;
+    public readonly double Elevator;
+    public readonly double Aileron;
+    public readonly double Rudder;
+    public readonly double ParkingBrake;
+
+    public ControlsStruct(double throttle = 0, double flaps = 0, double elevator = 0,
+                          double aileron = 0, double rudder = 0, double parkingBrake = 0)
+    {
+        Throttle = throttle;
+        Flaps = flaps;
+        Elevator = elevator;
+        Aileron = aileron;
+        Rudder = rudder;
+        ParkingBrake = parkingBrake;
+    }
+}
+
+public readonly struct CabinStruct
+{
+    public readonly bool LandingGearDown;
+    public readonly bool SpoilersDeployed;
+    public readonly bool AutopilotOn;
+    public readonly double AutopilotAltitude;
+    public readonly double AutopilotHeading;
+
+    public CabinStruct(bool gear = false, bool spoilers = false, bool autopilot = false,
+                       double alt = 0, double heading = 0)
+    {
+        LandingGearDown = gear;
+        SpoilersDeployed = spoilers;
+        AutopilotOn = autopilot;
+        AutopilotAltitude = alt;
+        AutopilotHeading = heading;
+    }
+}
+
+public readonly struct DoorsStruct
+{
+    public readonly bool DoorLeftOpen;
+    public readonly bool DoorRightOpen;
+    public readonly bool CargoDoorOpen;
+    public readonly bool RampOpen;
+
+    public DoorsStruct(bool left = false, bool right = false, bool cargo = false, bool ramp = false)
+    {
+        DoorLeftOpen = left;
+        DoorRightOpen = right;
+        CargoDoorOpen = cargo;
+        RampOpen = ramp;
+    }
+}
+
+public readonly struct DoorsRawStruct
+{
+    public readonly double Exit0;
+    public readonly double Exit1;
+    public readonly double Exit2;
+    public readonly double Exit3;
+
+    public DoorsRawStruct(double exit0 = 0, double exit1 = 0, double exit2 = 0, double exit3 = 0)
+    {
+        Exit0 = exit0;
+        Exit1 = exit1;
+        Exit2 = exit2;
+        Exit3 = exit3;
+    }
+}
+
+public readonly struct GroundSupportStruct
+{
+    public readonly bool CateringTruckPresent;
+    public readonly bool BaggageCartsPresent;
+    public readonly bool FuelTruckPresent;
+
+    public GroundSupportStruct(bool catering = false, bool baggage = false, bool fuel = false)
+    {
+        CateringTruckPresent = catering;
+        BaggageCartsPresent = baggage;
+        FuelTruckPresent = fuel;
+    }
+}
+
+public readonly struct SimVarDefinition
+{
+    public readonly string Variable;
+    public readonly string Units;
+    public readonly SIMCONNECT_DATATYPE DataType;
+    public readonly float Epsilon;
+
+    public SimVarDefinition(string variable, string units, SIMCONNECT_DATATYPE dataType, float epsilon = 0f)
+    {
+        Variable = variable;
+        Units = units;
+        DataType = dataType;
+        Epsilon = epsilon;
     }
 }
