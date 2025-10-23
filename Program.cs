@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -21,6 +22,45 @@ namespace SharedCockpitClient
         static IntPtr simconnectWindowHandle = IntPtr.Zero;
 
         const int WM_USER_SIMCONNECT = 0x0402;
+
+        static readonly Dictionary<uint, string> SimConnectExceptionDescriptions = new()
+        {
+            { 0u, "Sin error" },
+            { 1u, "Error genérico" },
+            { 2u, "Tamaño de datos incompatible" },
+            { 3u, "Identificador no reconocido" },
+            { 4u, "Conexión no inicializada" },
+            { 5u, "Versión incompatible" },
+            { 6u, "Demasiados grupos registrados" },
+            { 7u, "Variable inválida o no disponible" },
+            { 8u, "Demasiados nombres de evento" },
+            { 9u, "Identificador de evento duplicado" },
+            { 10u, "Demasiados mapeos registrados" },
+            { 11u, "Demasiados objetos" },
+            { 12u, "Demasiadas peticiones simultáneas" },
+            { 13u, "Error de peso y balance" },
+            { 14u, "Error interno de SimConnect" },
+            { 15u, "Operación no soportada" },
+            { 16u, "Objeto fuera de la burbuja de realidad" },
+            { 17u, "Error en contenedor de objeto" },
+            { 18u, "Error con objeto de IA" },
+            { 19u, "Error de ATC" },
+            { 20u, "Error de sesión compartida" },
+            { 21u, "Identificador de dato inválido" },
+            { 22u, "Buffer demasiado pequeño" },
+            { 23u, "Desbordamiento de buffer" },
+            { 24u, "Tipo de dato inválido" },
+            { 25u, "Operación ilegal" },
+            { 26u, "Funcionalidad de misiones obsoleta" }
+        };
+
+        static bool attitudeRegistered;
+        static bool positionRegistered;
+        static bool speedRegistered;
+        static bool controlsRegistered;
+        static bool cabinRegistered;
+        static bool doorsRegistered;
+        static bool groundSupportRegistered;
 
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr CreateWindowEx(
@@ -143,6 +183,22 @@ namespace SharedCockpitClient
             }
         }
 
+        readonly struct DoorsRawStruct
+        {
+            public readonly double Exit0;
+            public readonly double Exit1;
+            public readonly double Exit2;
+            public readonly double Exit3;
+
+            public DoorsRawStruct(double exit0 = 0, double exit1 = 0, double exit2 = 0, double exit3 = 0)
+            {
+                Exit0 = exit0;
+                Exit1 = exit1;
+                Exit2 = exit2;
+                Exit3 = exit3;
+            }
+        }
+
         readonly struct GroundSupportStruct
         {
             public readonly bool CateringTruckPresent;
@@ -154,6 +210,22 @@ namespace SharedCockpitClient
                 CateringTruckPresent = catering;
                 BaggageCartsPresent = baggage;
                 FuelTruckPresent = fuel;
+            }
+        }
+
+        readonly struct SimVarDefinition
+        {
+            public readonly string Variable;
+            public readonly string Units;
+            public readonly SIMCONNECT_DATATYPE DataType;
+            public readonly float Epsilon;
+
+            public SimVarDefinition(string variable, string units, SIMCONNECT_DATATYPE dataType, float epsilon = 0f)
+            {
+                Variable = variable;
+                Units = units;
+                DataType = dataType;
+                Epsilon = epsilon;
             }
         }
 
@@ -183,19 +255,23 @@ namespace SharedCockpitClient
                 simconnect.OnRecvException += OnSimConnectException;
                 simconnect.OnRecvSimobjectData += OnSimData;
 
+                Console.WriteLine("✅ SimConnect inicializado correctamente.");
+
                 // ---- DEFINICIONES ----
-                AddAttitudeDefinition();
-                AddPositionDefinition();
-                AddSpeedDefinition();
-                AddControlsDefinition();
-                AddCabinDefinition();
-                AddDoorsDefinition();
-                AddGroundSupportDefinition();
+                attitudeRegistered = AddAttitudeDefinition();
+                positionRegistered = AddPositionDefinition();
+                speedRegistered = AddSpeedDefinition();
+                controlsRegistered = AddControlsDefinition();
+                cabinRegistered = AddCabinDefinition();
+                doorsRegistered = AddDoorsDefinition();
+                groundSupportRegistered = AddGroundSupportDefinition();
+
+                LogDefinitionSummary();
 
                 // ---- SOLICITAR DATOS ----
                 RequestData();
 
-                Console.WriteLine("✅ SimConnect inicializado correctamente. Recibiendo datos...");
+                Console.WriteLine("🛰️ Enviando datos reales de vuelo al copiloto...");
             }
             catch (Exception ex)
             {
@@ -316,7 +392,8 @@ namespace SharedCockpitClient
 
         static void OnSimConnectException(SimConnect sender, SIMCONNECT_RECV_EXCEPTION data)
         {
-            Console.WriteLine($"⚠️ Excepción SimConnect: {data.dwException}.");
+            var description = GetSimConnectExceptionDescription(data.dwException);
+            Console.WriteLine($"⚠️ Excepción SimConnect: {data.dwException} ({description}).");
         }
 
         static void OnWebSocketMessage(string message)
@@ -324,79 +401,177 @@ namespace SharedCockpitClient
             Console.WriteLine($"📨 Datos recibidos por WebSocket: {message}");
         }
 
+        static string GetSimConnectExceptionDescription(uint code)
+        {
+            return SimConnectExceptionDescriptions.TryGetValue(code, out var description)
+                ? description
+                : "Error no documentado";
+        }
+
+        static void LogDefinitionSummary()
+        {
+            if (attitudeRegistered && positionRegistered && speedRegistered && controlsRegistered && cabinRegistered && doorsRegistered)
+            {
+                Console.WriteLine("✅ Todas las variables registradas con éxito.");
+            }
+            else
+            {
+                Console.WriteLine("⚠️ Algunas variables no se pudieron registrar. Revisá los mensajes anteriores para más detalles.");
+            }
+        }
+
+        static bool RegisterDefinitionGroup<T>(DEFINITIONS definition, string groupName, params SimVarDefinition[] variables) where T : struct
+        {
+            if (simconnect == null)
+            {
+                Console.WriteLine($"⚠️ No se pudo registrar el grupo '{groupName}' porque la conexión SimConnect no está disponible.");
+                return false;
+            }
+
+            bool success = true;
+
+            foreach (var variable in variables)
+            {
+                success = TryAddSimVar(definition, variable, groupName) && success;
+            }
+
+            if (!success)
+            {
+                Console.WriteLine($"⚠️ Grupo '{groupName}' omitido: una o más variables no están disponibles en MSFS2024.");
+                return false;
+            }
+
+            try
+            {
+                simconnect.RegisterDataDefineStruct<T>(definition);
+                Console.WriteLine($"✅ Grupo '{groupName}' registrado correctamente.");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ No se pudo registrar el grupo '{groupName}': {ex.Message}");
+                return false;
+            }
+        }
+
+        static bool TryAddSimVar(DEFINITIONS definition, SimVarDefinition simVar, string groupName)
+        {
+            if (simconnect == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                simconnect.AddToDataDefinition(definition, simVar.Variable, simVar.Units, simVar.DataType, simVar.Epsilon, SimConnect.SIMCONNECT_UNUSED);
+                return true;
+            }
+            catch (COMException ex)
+            {
+                Console.WriteLine($"⚠️ Variable ignorada por MSFS2024: {simVar.Variable} ({groupName}). {ex.Message}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"⚠️ Error al registrar la variable {simVar.Variable} ({groupName}): {ex.Message}");
+            }
+
+            return false;
+        }
+
+        static bool IsExitOpen(double value) => value > 0.5;
+
         // ---- DEFINICIONES DE SIMCONNECT ----
-        static void AddAttitudeDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Attitude, "PLANE PITCH DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Attitude, "PLANE BANK DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Attitude, "PLANE HEADING DEGREES TRUE", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<AttitudeStruct>(DEFINITIONS.Attitude);
-        }
+        static bool AddAttitudeDefinition() => RegisterDefinitionGroup<AttitudeStruct>(
+            DEFINITIONS.Attitude,
+            "Actitud",
+            new SimVarDefinition("PLANE PITCH DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("PLANE BANK DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("PLANE HEADING DEGREES TRUE", "degrees", SIMCONNECT_DATATYPE.FLOAT64));
 
-        static void AddPositionDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Position, "PLANE LATITUDE", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Position, "PLANE LONGITUDE", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Position, "PLANE ALTITUDE", "meters", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<PositionStruct>(DEFINITIONS.Position);
-        }
+        static bool AddPositionDefinition() => RegisterDefinitionGroup<PositionStruct>(
+            DEFINITIONS.Position,
+            "Posición",
+            new SimVarDefinition("PLANE LATITUDE", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("PLANE LONGITUDE", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("PLANE ALTITUDE", "meters", SIMCONNECT_DATATYPE.FLOAT64));
 
-        static void AddSpeedDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Speed, "AIRSPEED INDICATED", "knots", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Speed, "VERTICAL SPEED", "feet per minute", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Speed, "GROUND VELOCITY", "knots", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<SpeedStruct>(DEFINITIONS.Speed);
-        }
+        static bool AddSpeedDefinition() => RegisterDefinitionGroup<SpeedStruct>(
+            DEFINITIONS.Speed,
+            "Velocidades",
+            new SimVarDefinition("AIRSPEED INDICATED", "knots", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("VERTICAL SPEED", "feet per minute", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("GROUND VELOCITY", "knots", SIMCONNECT_DATATYPE.FLOAT64));
 
-        static void AddControlsDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "THROTTLE LEVER POSITION", "percent", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "FLAPS HANDLE INDEX", "number", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "ELEVATOR POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "AILERON POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "RUDDER POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Controls, "PARKING BRAKE POSITION", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<ControlsStruct>(DEFINITIONS.Controls);
-        }
+        static bool AddControlsDefinition() => RegisterDefinitionGroup<ControlsStruct>(
+            DEFINITIONS.Controls,
+            "Controles",
+            new SimVarDefinition("THROTTLE LEVER POSITION", "percent", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("FLAPS HANDLE INDEX", "number", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("ELEVATOR POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("AILERON POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("RUDDER POSITION", "degrees", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("PARKING BRAKE POSITION", "bool", SIMCONNECT_DATATYPE.INT32));
 
-        static void AddCabinDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Cabin, "GEAR HANDLE POSITION", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Cabin, "SPOILERS HANDLE POSITION", "percent", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Cabin, "AUTOPILOT MASTER", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Cabin, "AUTOPILOT ALTITUDE LOCK VAR", "meters", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Cabin, "AUTOPILOT HEADING LOCK DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<CabinStruct>(DEFINITIONS.Cabin);
-        }
+        static bool AddCabinDefinition() => RegisterDefinitionGroup<CabinStruct>(
+            DEFINITIONS.Cabin,
+            "Cabina",
+            new SimVarDefinition("GEAR HANDLE POSITION", "bool", SIMCONNECT_DATATYPE.INT32),
+            new SimVarDefinition("SPOILERS HANDLE POSITION", "percent", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("AUTOPILOT MASTER", "bool", SIMCONNECT_DATATYPE.INT32),
+            new SimVarDefinition("AUTOPILOT ALTITUDE LOCK VAR", "meters", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("AUTOPILOT HEADING LOCK DEGREES", "degrees", SIMCONNECT_DATATYPE.FLOAT64));
 
-        static void AddDoorsDefinition()
-        {
-            simconnect?.AddToDataDefinition(DEFINITIONS.Doors, "DOOR LEFT OPEN", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Doors, "DOOR RIGHT OPEN", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Doors, "CARGO DOOR OPEN", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.Doors, "RAMP POSITION", "percent", SIMCONNECT_DATATYPE.FLOAT64, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<DoorsStruct>(DEFINITIONS.Doors);
-        }
+        static bool AddDoorsDefinition() => RegisterDefinitionGroup<DoorsRawStruct>(
+            DEFINITIONS.Doors,
+            "Puertas",
+            new SimVarDefinition("EXIT OPEN:0", "percent", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("EXIT OPEN:1", "percent", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("EXIT OPEN:2", "percent", SIMCONNECT_DATATYPE.FLOAT64),
+            new SimVarDefinition("EXIT OPEN:3", "percent", SIMCONNECT_DATATYPE.FLOAT64));
 
-        static void AddGroundSupportDefinition()
+        static bool AddGroundSupportDefinition()
         {
-            simconnect?.AddToDataDefinition(DEFINITIONS.GroundSupport, "CATERING TRUCK PRESENT", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.GroundSupport, "BAGGAGE CARTS PRESENT", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.AddToDataDefinition(DEFINITIONS.GroundSupport, "FUEL TRUCK PRESENT", "bool", SIMCONNECT_DATATYPE.INT32, 0f, SimConnect.SIMCONNECT_UNUSED);
-            simconnect?.RegisterDataDefineStruct<GroundSupportStruct>(DEFINITIONS.GroundSupport);
+            Console.WriteLine("ℹ️ Grupo 'Soporte en tierra' omitido: las variables de MSFS2020 no están disponibles en MSFS2024.");
+            return false;
         }
 
         // ---- SOLICITAR DATOS ----
         static void RequestData()
         {
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_ATTITUDE, DEFINITIONS.Attitude, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_POSITION, DEFINITIONS.Position, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_SPEED, DEFINITIONS.Speed, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_CONTROLS, DEFINITIONS.Controls, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_CABIN, DEFINITIONS.Cabin, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_DOORS, DEFINITIONS.Doors, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
-            simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_GROUNDSUPPORT, DEFINITIONS.GroundSupport, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            if (attitudeRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_ATTITUDE, DEFINITIONS.Attitude, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (positionRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_POSITION, DEFINITIONS.Position, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (speedRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_SPEED, DEFINITIONS.Speed, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (controlsRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_CONTROLS, DEFINITIONS.Controls, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (cabinRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_CABIN, DEFINITIONS.Cabin, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (doorsRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_DOORS, DEFINITIONS.Doors, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
+
+            if (groundSupportRegistered)
+            {
+                simconnect?.RequestDataOnSimObject(DATA_REQUESTS.REQUEST_GROUNDSUPPORT, DEFINITIONS.GroundSupport, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_PERIOD.SECOND, SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT, 0, 0, 0);
+            }
         }
 
         // ---- RECEPCIÓN DE DATOS ----
@@ -467,7 +642,12 @@ namespace SharedCockpitClient
                     break;
 
                 case DATA_REQUESTS.REQUEST_DOORS:
-                    var door = (DoorsStruct)data.dwData[0];
+                    var rawDoor = (DoorsRawStruct)data.dwData[0];
+                    var door = new DoorsStruct(
+                        IsExitOpen(rawDoor.Exit0),
+                        IsExitOpen(rawDoor.Exit1),
+                        IsExitOpen(rawDoor.Exit2),
+                        IsExitOpen(rawDoor.Exit3));
                     if (door.DoorLeftOpen != lastDoors.DoorLeftOpen ||
                         door.DoorRightOpen != lastDoors.DoorRightOpen ||
                         door.CargoDoorOpen != lastDoors.CargoDoorOpen ||
