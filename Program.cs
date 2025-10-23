@@ -426,14 +426,32 @@ namespace SharedCockpitClient
                 var payload = JsonSerializer.Deserialize<FlightDataPayload>(message, flightDataJsonOptions);
                 if (payload?.Position != null && payload.Speed != null && payload.Attitude != null)
                 {
-                    UpdateFlightDisplay(
-                        payload.Speed.IndicatedAirspeed,
-                        payload.Speed.VerticalSpeed,
-                        payload.Speed.GroundSpeed,
-                        payload.Position.Altitude,
-                        payload.Attitude.Heading,
-                        payload.Position.Latitude,
-                        payload.Position.Longitude);
+                    double indicatedAirspeed = payload.Speed.IndicatedAirspeed;
+                    double verticalSpeed = payload.Speed.VerticalSpeed;
+                    double groundSpeed = payload.Speed.GroundSpeed;
+                    double altitudeMeters = payload.Position.Altitude;
+                    double headingDegrees = payload.Attitude.Heading;
+                    double latitude = payload.Position.Latitude;
+                    double longitude = payload.Position.Longitude;
+
+                    if (HasMeaningfulFlightValues(
+                        indicatedAirspeed,
+                        verticalSpeed,
+                        groundSpeed,
+                        altitudeMeters,
+                        headingDegrees,
+                        latitude,
+                        longitude))
+                    {
+                        UpdateFlightDisplay(
+                            indicatedAirspeed,
+                            verticalSpeed,
+                            groundSpeed,
+                            altitudeMeters,
+                            headingDegrees,
+                            latitude,
+                            longitude);
+                    }
                 }
             }
             catch (JsonException ex)
@@ -583,6 +601,21 @@ namespace SharedCockpitClient
                     Console.SetCursorPosition(0, Math.Max(0, nextLine));
                 }
             }
+        }
+
+        static bool HasMeaningfulFlightValues(params double[] values)
+        {
+            const double tolerance = 0.0001;
+
+            foreach (double value in values)
+            {
+                if (Math.Abs(value) > tolerance)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         static int SafeConsoleWidth()
