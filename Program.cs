@@ -1,4 +1,5 @@
-﻿using System;
+using System;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
@@ -17,6 +18,21 @@ namespace SharedCockpitClient
         static WebSocketManager? ws;
         static WebSocketHost? hostServer;
         static SimConnect? simconnect;
+        static IntPtr simconnectWindowHandle = IntPtr.Zero;
+
+        const int WM_USER_SIMCONNECT = 0x0402;
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern IntPtr CreateWindowEx(
+            int dwExStyle,
+            string lpClassName,
+            string lpWindowName,
+            int dwStyle,
+            int x, int y, int nWidth, int nHeight,
+            IntPtr hWndParent,
+            IntPtr hMenu,
+            IntPtr hInstance,
+            IntPtr lpParam);
 
         enum DEFINITIONS
         {
@@ -153,26 +169,38 @@ namespace SharedCockpitClient
         static void Main()
         {
             Console.OutputEncoding = Encoding.UTF8;
+            simconnectWindowHandle = CreateHiddenSimConnectWindow();
             ConfigureMode();
             SetupWebSocket();
             SetupShutdownHandlers();
 
-            // Conexión SimConnect
-            simconnect = new SimConnect("SharedCockpitClient", IntPtr.Zero, 0, null, 0);
-            simconnect.OnRecvOpen += (s, e) => Console.WriteLine($"🟢 Conectado con {e.szApplicationName}");
-            simconnect.OnRecvSimobjectData += OnSimData;
+            try
+            {
+                // Conexión SimConnect
+                simconnect = new SimConnect("SharedCockpitClient", simconnectWindowHandle, WM_USER_SIMCONNECT, null, 0);
+                simconnect.OnRecvOpen += OnSimConnectOpen;
+                simconnect.OnRecvQuit += OnSimConnectQuit;
+                simconnect.OnRecvException += OnSimConnectException;
+                simconnect.OnRecvSimobjectData += OnSimData;
 
-            // ---- DEFINICIONES ----
-            AddAttitudeDefinition();
-            AddPositionDefinition();
-            AddSpeedDefinition();
-            AddControlsDefinition();
-            AddCabinDefinition();
-            AddDoorsDefinition();
-            AddGroundSupportDefinition();
+                // ---- DEFINICIONES ----
+                AddAttitudeDefinition();
+                AddPositionDefinition();
+                AddSpeedDefinition();
+                AddControlsDefinition();
+                AddCabinDefinition();
+                AddDoorsDefinition();
+                AddGroundSupportDefinition();
 
-            // ---- SOLICITAR DATOS ----
-            RequestData();
+                // ---- SOLICITAR DATOS ----
+                RequestData();
+
+                Console.WriteLine("✅ SimConnect inicializado correctamente. Recibiendo datos...");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"❌ No se pudo conectar a SimConnect: {ex.Message}");
+            }
 
             // ---- BUCLE PRINCIPAL ----
             while (true)
@@ -180,6 +208,19 @@ namespace SharedCockpitClient
                 simconnect?.ReceiveMessage();
                 Thread.Sleep(100); // 10Hz
             }
+        }
+
+        static IntPtr CreateHiddenSimConnectWindow()
+        {
+            var handle = CreateWindowEx(0, "Static", "SharedCockpitClient_SimConnect", 0,
+                0, 0, 0, 0, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
+
+            if (handle == IntPtr.Zero)
+            {
+                Console.WriteLine($"⚠️ No se pudo crear la ventana oculta de SimConnect (Error {Marshal.GetLastWin32Error()}).");
+            }
+
+            return handle;
         }
 
         static void ConfigureMode()
@@ -261,6 +302,21 @@ namespace SharedCockpitClient
             ws?.Close();
             hostServer?.Stop();
             simconnect?.Dispose();
+        }
+
+        static void OnSimConnectOpen(SimConnect sender, SIMCONNECT_RECV_OPEN data)
+        {
+            Console.WriteLine($"🟢 Conectado correctamente con {data.szApplicationName}.");
+        }
+
+        static void OnSimConnectQuit(SimConnect sender, SIMCONNECT_RECV data)
+        {
+            Console.WriteLine("🔴 MSFS se cerró. SimConnect desconectado.");
+        }
+
+        static void OnSimConnectException(SimConnect sender, SIMCONNECT_RECV_EXCEPTION data)
+        {
+            Console.WriteLine($"⚠️ Excepción SimConnect: {data.dwException}.");
         }
 
         static void OnWebSocketMessage(string message)
