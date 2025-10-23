@@ -1197,6 +1197,18 @@ namespace SharedCockpitClient
 
             if (send && hasPrimaryData)
             {
+                if (isHost && hasAttitudeData && hasPositionData && hasSpeedData)
+                {
+                    UpdateFlightDisplay(
+                        lastSpeed.IndicatedAirspeed,
+                        lastSpeed.VerticalSpeed,
+                        lastSpeed.GroundSpeed,
+                        lastPosition.Altitude,
+                        lastAttitude.Heading,
+                        lastPosition.Latitude,
+                        lastPosition.Longitude);
+                }
+
                 var json = JsonSerializer.Serialize(new
                 {
                     attitude = lastAttitude,
