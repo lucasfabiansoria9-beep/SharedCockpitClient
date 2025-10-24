@@ -9,7 +9,7 @@ namespace SharedCockpitClient.FlightData;
 public sealed class SimDataCollector : IDisposable
 {
     private readonly SimConnect _simconnect;
-    private readonly Timer _pollTimer;
+    private readonly System.Threading.Timer _pollTimer; // ✅ especificamos namespace completo
     private readonly object _lock = new();
     private readonly HashSet<SimDataDefinition> _registeredDefinitions = new();
     private readonly SimStateSnapshot _snapshot = new();
@@ -22,7 +22,7 @@ public sealed class SimDataCollector : IDisposable
 
         _simconnect.OnRecvSimobjectData += OnSimData;
 
-        _pollTimer = new Timer(OnPoll, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
+        _pollTimer = new System.Threading.Timer(OnPoll, null, Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan); // ✅ igual aquí
 
         RegisterDefinitions();
     }
@@ -43,9 +43,7 @@ public sealed class SimDataCollector : IDisposable
     public void Start()
     {
         if (_disposed)
-        {
             throw new ObjectDisposedException(nameof(SimDataCollector));
-        }
 
         Logger.Info("🛰️ Iniciando recolección periódica de datos del simulador...");
         RequestAll();
@@ -55,9 +53,7 @@ public sealed class SimDataCollector : IDisposable
     public void Stop()
     {
         if (_disposed)
-        {
             return;
-        }
 
         _pollTimer.Change(Timeout.InfiniteTimeSpan, Timeout.InfiniteTimeSpan);
     }
@@ -65,9 +61,7 @@ public sealed class SimDataCollector : IDisposable
     public void Dispose()
     {
         if (_disposed)
-        {
             return;
-        }
 
         _disposed = true;
         _pollTimer.Dispose();
@@ -77,9 +71,7 @@ public sealed class SimDataCollector : IDisposable
     private void OnPoll(object? state)
     {
         if (_disposed)
-        {
             return;
-        }
 
         try
         {
@@ -169,9 +161,7 @@ public sealed class SimDataCollector : IDisposable
         try
         {
             foreach (var variable in variables)
-            {
                 _simconnect.AddToDataDefinition(definition, variable.Variable, variable.Units, variable.DataType, variable.Epsilon, SimConnect.SIMCONNECT_UNUSED);
-            }
 
             _simconnect.RegisterDataDefineStruct<T>(definition);
             _registeredDefinitions.Add(definition);
@@ -188,9 +178,7 @@ public sealed class SimDataCollector : IDisposable
         foreach (SimDataDefinition definition in Enum.GetValues(typeof(SimDataDefinition)))
         {
             if (!_registeredDefinitions.Contains(definition))
-            {
                 continue;
-            }
 
             try
             {
