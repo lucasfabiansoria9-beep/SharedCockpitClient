@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using Microsoft.FlightSimulator.SimConnect;
 using SharedCockpitClient.Utils;
 
@@ -20,6 +22,7 @@ public sealed class SimConnectManager : IDisposable
     private bool _disposed;
 
     public event Action<string>? OnSimStateChanged;
+    public event Action<SimStateSnapshot>? OnSnapshot;
 
     public bool Initialize()
     {
@@ -40,7 +43,10 @@ public sealed class SimConnectManager : IDisposable
             _collector = new SimDataCollector(_simconnect);
             _collector.OnSnapshot += HandleSnapshot;
 
-            _commandApplier = new SimCommandApplier(_simconnect);
+            _commandApplier = new SimCommandApplier(
+                _simconnect,
+                GetSnapshotClone,
+                UpdateSnapshot);
 
             _collector.Start();
 
@@ -60,18 +66,45 @@ public sealed class SimConnectManager : IDisposable
         _simconnect?.ReceiveMessage();
     }
 
-    public void ApplyRemoteCommand(string json)
+    public bool ApplyRemoteChanges(IReadOnlyDictionary<string, object?> changes)
     {
         if (_commandApplier == null)
         {
-            return;
+            return false;
         }
 
-        var updated = _commandApplier.Apply(json, GetSnapshotClone, UpdateSnapshot);
-        if (updated != null)
+        if (!_commandApplier.ApplyRemoteChanges(changes))
         {
-            _diffEngine.CommitExternalState(updated.ToDictionary());
+            return false;
         }
+
+        lock (_stateLock)
+        {
+            _diffEngine.CommitExternalState(_latestSnapshot.ToDictionary());
+        }
+
+        return true;
+    }
+
+    public bool ApplyRemoteFullSnapshot(SimStateSnapshot snapshot)
+    {
+        if (_commandApplier == null)
+        {
+            return false;
+        }
+
+        if (!_commandApplier.ApplyFullSnapshot(snapshot))
+        {
+            return false;
+        }
+
+        lock (_stateLock)
+        {
+            _latestSnapshot = snapshot.Clone();
+            _diffEngine.CommitExternalState(_latestSnapshot.ToDictionary());
+        }
+
+        return true;
     }
 
     public string? GetFullSnapshotPayload()
@@ -84,7 +117,18 @@ public sealed class SimConnectManager : IDisposable
             return null;
         }
 
-        return _diffEngine.ComputeDiff(_localRole, state, forceFull: true);
+        return JsonSerializer.Serialize(state, new JsonSerializerOptions
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        });
+    }
+
+    public SimStateSnapshot GetCurrentSnapshot()
+    {
+        lock (_stateLock)
+        {
+            return _latestSnapshot.Clone();
+        }
     }
 
     public string LocalRole
@@ -137,6 +181,8 @@ public sealed class SimConnectManager : IDisposable
         {
             _latestSnapshot = snapshot.Clone();
         }
+
+        OnSnapshot?.Invoke(snapshot.Clone());
 
         var state = snapshot.ToDictionary();
         var payload = _diffEngine.ComputeDiff(_localRole, state);
