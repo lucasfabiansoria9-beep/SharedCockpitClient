@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text.Json;
 using Microsoft.FlightSimulator.SimConnect;
 using SharedCockpitClient.Utils;
@@ -11,12 +12,31 @@ public sealed class SimCommandApplier
 {
     private const GROUP_PRIORITY GROUP_PRIORITY_HIGHEST = GROUP_PRIORITY.HIGHEST;
 
+    private static readonly SimDataDefinition[] FullSyncDefinitions =
+    {
+        SimDataDefinition.Controls,
+        SimDataDefinition.Cabin,
+        SimDataDefinition.Systems,
+        SimDataDefinition.Doors,
+        SimDataDefinition.Ground,
+        SimDataDefinition.Environment,
+        SimDataDefinition.Avionics
+    };
+
     private readonly SimConnect _simconnect;
     private readonly Dictionary<string, ClientEvent> _eventByKey;
+    private readonly Func<SimStateSnapshot> _snapshotAccessor;
+    private readonly Action<SimStateSnapshot> _snapshotUpdater;
+    private readonly object _lock = new();
 
-    public SimCommandApplier(SimConnect simconnect)
+    public SimCommandApplier(
+        SimConnect simconnect,
+        Func<SimStateSnapshot> snapshotAccessor,
+        Action<SimStateSnapshot> snapshotUpdater)
     {
         _simconnect = simconnect ?? throw new ArgumentNullException(nameof(simconnect));
+        _snapshotAccessor = snapshotAccessor ?? throw new ArgumentNullException(nameof(snapshotAccessor));
+        _snapshotUpdater = snapshotUpdater ?? throw new ArgumentNullException(nameof(snapshotUpdater));
 
         _eventByKey = new Dictionary<string, ClientEvent>(StringComparer.OrdinalIgnoreCase)
         {
@@ -39,101 +59,123 @@ public sealed class SimCommandApplier
         RegisterEvents();
     }
 
-    public SimStateSnapshot? Apply(string json,
-        Func<SimStateSnapshot> snapshotAccessor,
-        Action<SimStateSnapshot> snapshotUpdater)
+    public bool ApplyRemoteChanges(IReadOnlyDictionary<string, object?> changes)
     {
-        if (string.IsNullOrWhiteSpace(json))
+        if (changes == null || changes.Count == 0)
         {
-            return null;
+            return false;
         }
 
-        if (snapshotAccessor == null)
+        lock (_lock)
         {
-            throw new ArgumentNullException(nameof(snapshotAccessor));
-        }
-
-        if (snapshotUpdater == null)
-        {
-            throw new ArgumentNullException(nameof(snapshotUpdater));
-        }
-
-        SimStateSnapshot snapshot;
-        try
-        {
-            snapshot = snapshotAccessor();
-        }
-        catch (Exception ex)
-        {
-            Logger.Warn($"⚠️ No se pudo obtener el estado actual antes de aplicar comandos: {ex.Message}");
-            return null;
-        }
-
-        var definitionsToUpdate = new HashSet<SimDataDefinition>();
-        var eventsToSend = new List<(ClientEvent evt, uint data)>();
-
-        try
-        {
-            using var doc = JsonDocument.Parse(json);
-            var root = doc.RootElement;
-
-            if (root.TryGetProperty("state", out var stateElement) && stateElement.ValueKind == JsonValueKind.Object)
+            if (!TryGetSnapshot(out var snapshot))
             {
-                ApplyNestedObject(stateElement, snapshot, definitionsToUpdate, eventsToSend);
+                return false;
             }
 
-            if (root.TryGetProperty("changes", out var changesElement) && changesElement.ValueKind == JsonValueKind.Object)
+            var definitions = new HashSet<SimDataDefinition>();
+            var eventsToSend = new List<(ClientEvent evt, uint data)>();
+            var appliedAny = false;
+
+            foreach (var change in changes)
             {
-                ApplyFlatObject(changesElement, snapshot, definitionsToUpdate, eventsToSend);
+                var key = change.Key;
+                var normalizedValue = NormalizeValue(change.Value);
+
+                if (ApplyKey(key, normalizedValue, snapshot, definitions, eventsToSend))
+                {
+                    appliedAny = true;
+                }
+                else
+                {
+                    Logger.Warn($"⚠️ Cambio remoto desconocido o inválido: {key}");
+                }
             }
+
+            if (!appliedAny)
+            {
+                return false;
+            }
+
+            Dispatch(eventsToSend, definitions, snapshot);
+            Logger.Info($"🔁 Cambios remotos aplicados ({changes.Count}).");
+            return true;
         }
-        catch (JsonException ex)
+    }
+
+    public bool ApplyRemoteChange(string key, object? value)
+        => ApplyRemoteChanges(new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
         {
-            Logger.Warn($"⚠️ No se pudo analizar el comando remoto: {ex.Message}");
-            return null;
+            [key] = value
+        });
+
+    public bool ApplyFullSnapshot(SimStateSnapshot snapshot)
+    {
+        if (snapshot == null)
+        {
+            Logger.Warn("⚠️ Se recibió un snapshot remoto nulo.");
+            return false;
         }
 
+        lock (_lock)
+        {
+            var clone = snapshot.Clone();
+            foreach (var definition in FullSyncDefinitions)
+            {
+                SendDefinition(definition, clone);
+            }
+
+            _snapshotUpdater(clone);
+        }
+
+        Logger.Info("🆕 Snapshot remoto completo aplicado correctamente.");
+        return true;
+    }
+
+    private void Dispatch(
+        List<(ClientEvent evt, uint data)> eventsToSend,
+        HashSet<SimDataDefinition> definitions,
+        SimStateSnapshot snapshot)
+    {
         foreach (var (evt, data) in eventsToSend)
         {
             TransmitEvent(evt, data);
         }
 
-        foreach (var definition in definitionsToUpdate)
+        foreach (var definition in definitions)
         {
             SendDefinition(definition, snapshot);
         }
 
-        snapshotUpdater(snapshot);
-        return snapshot;
+        _snapshotUpdater(snapshot.Clone());
     }
 
-    private void ApplyNestedObject(JsonElement element, SimStateSnapshot snapshot, HashSet<SimDataDefinition> definitions, List<(ClientEvent evt, uint data)> events)
+    private bool TryGetSnapshot(out SimStateSnapshot snapshot)
     {
-        foreach (var group in element.EnumerateObject())
+        try
         {
-            if (group.Value.ValueKind != JsonValueKind.Object)
-            {
-                continue;
-            }
-
-            foreach (var field in group.Value.EnumerateObject())
-            {
-                ApplyKey($"{group.Name}.{field.Name}", field.Value, snapshot, definitions, events);
-            }
+            snapshot = _snapshotAccessor();
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"⚠️ No se pudo obtener el estado actual antes de aplicar comandos: {ex.Message}");
+            snapshot = new SimStateSnapshot();
+            return false;
         }
     }
 
-    private void ApplyFlatObject(JsonElement element, SimStateSnapshot snapshot, HashSet<SimDataDefinition> definitions, List<(ClientEvent evt, uint data)> events)
+    private bool ApplyKey(
+        string key,
+        object? value,
+        SimStateSnapshot snapshot,
+        HashSet<SimDataDefinition> definitions,
+        List<(ClientEvent evt, uint data)> events)
     {
-        foreach (var property in element.EnumerateObject())
+        if (string.IsNullOrWhiteSpace(key))
         {
-            ApplyKey(property.Name, property.Value, snapshot, definitions, events);
+            return false;
         }
-    }
-
-    private void ApplyKey(string key, JsonElement valueElement, SimStateSnapshot snapshot, HashSet<SimDataDefinition> definitions, List<(ClientEvent evt, uint data)> events)
-    {
-        var value = ConvertJsonValue(valueElement);
 
         if (_eventByKey.TryGetValue(key, out var evt))
         {
@@ -143,14 +185,42 @@ public sealed class SimCommandApplier
 
         if (!snapshot.TryApplyChange(key, value))
         {
-            return;
+            return false;
         }
 
         if (TryGetDefinitionForKey(key, out var definition))
         {
             definitions.Add(definition);
         }
+
+        return true;
     }
+
+    private static object? NormalizeValue(object? value)
+    {
+        return value switch
+        {
+            null => null,
+            JsonElement element => ConvertJsonValue(element),
+            _ => value
+        };
+    }
+
+    private static object? ConvertJsonValue(JsonElement element) => element.ValueKind switch
+    {
+        JsonValueKind.True => true,
+        JsonValueKind.False => false,
+        JsonValueKind.Number when element.TryGetInt64(out var intValue) => intValue,
+        JsonValueKind.Number => element.GetDouble(),
+        JsonValueKind.String => element.GetString(),
+        JsonValueKind.Null => null,
+        JsonValueKind.Array => element.EnumerateArray().Select(ConvertJsonValue).ToArray(),
+        JsonValueKind.Object => element.EnumerateObject().ToDictionary(
+            property => property.Name,
+            property => ConvertJsonValue(property.Value),
+            StringComparer.OrdinalIgnoreCase),
+        _ => element.ToString()
+    };
 
     private void SendDefinition(SimDataDefinition definition, SimStateSnapshot snapshot)
     {
@@ -290,17 +360,6 @@ public sealed class SimCommandApplier
         }
     }
 
-    private static object? ConvertJsonValue(JsonElement element) => element.ValueKind switch
-    {
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        JsonValueKind.Number when element.TryGetInt64(out var intValue) => intValue,
-        JsonValueKind.Number => element.GetDouble(),
-        JsonValueKind.String => element.GetString(),
-        JsonValueKind.Null => null,
-        _ => element.ToString()
-    };
-
     private static bool ConvertToBool(object? value)
     {
         return value switch
@@ -310,6 +369,7 @@ public sealed class SimCommandApplier
             int i => i != 0,
             long l => l != 0,
             double d => Math.Abs(d) > double.Epsilon,
+            decimal m => Math.Abs((double)m) > double.Epsilon,
             string s when bool.TryParse(s, out var parsedBool) => parsedBool,
             string s when int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsedInt) => parsedInt != 0,
             _ => false
