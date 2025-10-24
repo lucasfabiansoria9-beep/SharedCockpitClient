@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Concurrent;
+using System.IO;
+using System.IO.Compression;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -80,7 +82,7 @@ namespace SharedCockpitClient.Network
                     Logger.Info($"👥 Cliente conectado ({clientId})");
                     OnClientConnected?.Invoke(clientId);
 
-                    await SendAsync(socket, "ROLE:COPILOT");
+                    await SendStringAsync(socket, "ROLE:COPILOT");
                     _ = Task.Run(() => HandleClientAsync(clientId, socket));
                 }
                 catch (Exception ex)
@@ -106,6 +108,7 @@ namespace SharedCockpitClient.Network
                     if (result.MessageType == WebSocketMessageType.Text)
                     {
                         var msg = Encoding.UTF8.GetString(buffer, 0, result.Count);
+                        msg = MaybeDecompress(msg);
                         OnMessage?.Invoke(msg);
                     }
                 }
@@ -128,8 +131,6 @@ namespace SharedCockpitClient.Network
 
         public void Broadcast(string message)
         {
-            var payload = Encoding.UTF8.GetBytes(message);
-
             foreach (var kv in clients)
             {
                 var socket = kv.Value;
@@ -137,12 +138,7 @@ namespace SharedCockpitClient.Network
                 {
                     try
                     {
-                        _ = socket.SendAsync(
-                            new ArraySegment<byte>(payload),
-                            WebSocketMessageType.Text,
-                            true,
-                            CancellationToken.None
-                        );
+                        _ = SendStringAsync(socket, message);
                     }
                     catch (Exception ex)
                     {
@@ -152,9 +148,25 @@ namespace SharedCockpitClient.Network
             }
         }
 
-        private static async Task SendAsync(WebSocket socket, string message)
+        public void SendToClient(Guid clientId, string message)
         {
-            var data = Encoding.UTF8.GetBytes(message);
+            if (!clients.TryGetValue(clientId, out var socket))
+            {
+                return;
+            }
+
+            if (socket.State != WebSocketState.Open)
+            {
+                return;
+            }
+
+            _ = SendStringAsync(socket, message);
+        }
+
+        private static async Task SendStringAsync(WebSocket socket, string message)
+        {
+            var prepared = PreparePayload(message);
+            var data = Encoding.UTF8.GetBytes(prepared);
             await socket.SendAsync(new ArraySegment<byte>(data),
                 WebSocketMessageType.Text,
                 true,
@@ -162,5 +174,50 @@ namespace SharedCockpitClient.Network
         }
 
         public void ReservePilotRole() => Logger.Info("🧭 Rol del servidor: PILOT");
+
+        private static string PreparePayload(string message)
+        {
+            var bytes = Encoding.UTF8.GetBytes(message);
+            if (bytes.Length < 512)
+            {
+                return message;
+            }
+
+            try
+            {
+                using var output = new MemoryStream();
+                using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+                {
+                    gzip.Write(bytes, 0, bytes.Length);
+                }
+
+                return "gz:" + Convert.ToBase64String(output.ToArray());
+            }
+            catch
+            {
+                return message;
+            }
+        }
+
+        private static string MaybeDecompress(string message)
+        {
+            if (!message.StartsWith("gz:", StringComparison.Ordinal))
+            {
+                return message;
+            }
+
+            try
+            {
+                var compressed = Convert.FromBase64String(message[3..]);
+                using var input = new MemoryStream(compressed);
+                using var gzip = new GZipStream(input, CompressionMode.Decompress);
+                using var reader = new StreamReader(gzip, Encoding.UTF8);
+                return reader.ReadToEnd();
+            }
+            catch
+            {
+                return message;
+            }
+        }
     }
 }

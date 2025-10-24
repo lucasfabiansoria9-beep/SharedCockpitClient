@@ -1,4 +1,6 @@
 using System;
+using System.IO;
+using System.IO.Compression;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -57,7 +59,7 @@ namespace SharedCockpitClient.Network
                 return;
             }
 
-            var payload = Encoding.UTF8.GetBytes(message);
+            var payload = PreparePayload(message);
             _ = SendInternalAsync(socket, payload);
         }
 
@@ -230,6 +232,7 @@ namespace SharedCockpitClient.Network
 
         private void HandleIncomingMessage(string message)
         {
+            message = MaybeDecompress(message);
             if (message.StartsWith("ROLE:", StringComparison.OrdinalIgnoreCase))
             {
                 var assignedRole = message.Substring("ROLE:".Length).Trim();
@@ -247,6 +250,52 @@ namespace SharedCockpitClient.Network
             }
 
             OnMessage.Invoke(message);
+        }
+
+        private static byte[] PreparePayload(string message)
+        {
+            var bytes = Encoding.UTF8.GetBytes(message);
+            if (bytes.Length < 512)
+            {
+                return bytes;
+            }
+
+            try
+            {
+                using var output = new MemoryStream();
+                using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
+                {
+                    gzip.Write(bytes, 0, bytes.Length);
+                }
+
+                var compressed = Convert.ToBase64String(output.ToArray());
+                return Encoding.UTF8.GetBytes("gz:" + compressed);
+            }
+            catch
+            {
+                return bytes;
+            }
+        }
+
+        private static string MaybeDecompress(string message)
+        {
+            if (!message.StartsWith("gz:", StringComparison.Ordinal))
+            {
+                return message;
+            }
+
+            try
+            {
+                var compressed = Convert.FromBase64String(message[3..]);
+                using var input = new MemoryStream(compressed);
+                using var gzip = new GZipStream(input, CompressionMode.Decompress);
+                using var reader = new StreamReader(gzip, Encoding.UTF8);
+                return reader.ReadToEnd();
+            }
+            catch
+            {
+                return message;
+            }
         }
     }
 }
