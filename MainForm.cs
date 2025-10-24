@@ -2,6 +2,7 @@
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.Network;
 using System.Windows.Forms;
 
 namespace SharedCockpitClient

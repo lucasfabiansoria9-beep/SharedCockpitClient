@@ -1,6 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
-  <!-- Comando recomendado: dotnet publish "SharedCockpitClient.csproj" -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:PublishTrimmed=false -o "E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish" -->
+
+  <!-- Comando recomendado para publicar manualmente:
+  dotnet publish "SharedCockpitClient.csproj" -c Release -r win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:PublishTrimmed=false -o "E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish"
+  -->
+
   <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -33,9 +37,6 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
-  </ItemGroup>
-
-  <ItemGroup>
     <Content Include="libs\native\win-x64\**\*.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
@@ -69,5 +70,6 @@
           Condition="'@(NativeSimConnect)' != '' and '$(PublishDir)' != ''" />
   </Target>
 
-  <!-- Abrir el proyecto en Visual Studio, compilar en Release y publicar con el perfil Folder apuntando a: E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish -->
+  <!-- Abrir el proyecto en Visual Studio, compilar en Release y publicar con el perfil Folder apuntando a:
+       E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish -->
 </Project>
