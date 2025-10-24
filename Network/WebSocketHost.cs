@@ -1,102 +1,312 @@
 using System;
-using WebSocketSharp;
-using WebSocketSharp.Server;
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.WebSockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+using SharedCockpitClient.Utils;
 
-namespace SharedCockpitClient.Network
+namespace SharedCockpitClient.Network;
+
+/// <summary>
+/// Servidor WebSocket sencillo que acepta conexiones entrantes del copiloto.
+/// Permite enviar mensajes a todos los clientes conectados y expone eventos
+/// para reaccionar a la conexión, desconexión y mensajes recibidos.
+/// </summary>
+public sealed class WebSocketHost : IDisposable
 {
-    /// <summary>
-    /// Servidor WebSocket sencillo que acepta conexiones entrantes del copiloto.
-    /// Permite enviar mensajes a todos los clientes conectados y expone eventos
-    /// para reaccionar a la conexión, desconexión y mensajes recibidos.
-    /// </summary>
-    public sealed class WebSocketHost : IDisposable
+    private readonly HttpListener listener;
+    private readonly ConcurrentDictionary<Guid, WebSocket> clients = new();
+    private readonly int port;
+    private CancellationTokenSource? cts;
+    private Task? listenTask;
+    private bool disposed;
+
+    public event Action OnClientConnected = delegate { };
+    public event Action OnClientDisconnected = delegate { };
+    public event Action<string> OnMessage = delegate { };
+
+    public WebSocketHost(int port)
     {
-        private readonly WebSocketServer server;
+        this.port = port;
+        listener = new HttpListener();
+        listener.Prefixes.Add($"http://0.0.0.0:{port}/");
+    }
 
-        public event Action OnClientConnected = delegate { };
-        public event Action OnClientDisconnected = delegate { };
-        public event Action<string> OnMessage = delegate { };
-
-        public WebSocketHost(int port)
+    public void Start()
+    {
+        if (listener.IsListening || disposed)
         {
-            server = new WebSocketServer(System.Net.IPAddress.Any, port);
-            server.AddWebSocketService("/", () => new HostBehavior(this));
+            return;
         }
 
-        public void Start()
+        cts = new CancellationTokenSource();
+
+        try
         {
-            if (!server.IsListening)
-            {
-                server.Start();
-                SharedCockpitClient.Utils.Logger.Info($"🛰️ Servidor WebSocket activo en ws://0.0.0.0:{server.Port}");
-            }
+            listener.Start();
+            Logger.Info($"🛰️ Servidor WebSocket activo en ws://0.0.0.0:{port}");
+            listenTask = Task.Run(() => AcceptLoopAsync(cts.Token));
         }
-
-        public void Stop()
+        catch (HttpListenerException ex)
         {
-            if (server.IsListening)
-            {
-                server.Stop();
-                SharedCockpitClient.Utils.Logger.Info("🛑 Servidor WebSocket detenido.");
-            }
-        }
-
-        public bool HasClients
-        {
-            get
-            {
-                if (!server.IsListening) return false;
-                var host = server.WebSocketServices["/"];
-                return host?.Sessions?.Count > 0;
-            }
-        }
-
-        public void Broadcast(string message)
-        {
-            if (!server.IsListening) return;
-
-            var host = server.WebSocketServices["/"];
-            host?.Sessions?.Broadcast(message);
-        }
-
-        public void Dispose()
-        {
+            Logger.Error($"⚠️ No se pudo iniciar el servidor WebSocket: {ex.Message}");
             Stop();
         }
+    }
 
-        private sealed class HostBehavior : WebSocketBehavior
+    public void Stop()
+    {
+        if (disposed)
         {
-            private readonly WebSocketHost parent;
+            return;
+        }
 
-            public HostBehavior(WebSocketHost parent)
+        try
+        {
+            cts?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+            // Ignorar: el token ya fue liberado.
+        }
+
+        if (listener.IsListening)
+        {
+            try
             {
-                this.parent = parent;
+                listener.Stop();
+            }
+            catch (ObjectDisposedException)
+            {
+                // Ya está detenido.
+            }
+        }
+
+        if (listenTask != null)
+        {
+            try
+            {
+                listenTask.Wait(TimeSpan.FromSeconds(2));
+            }
+            catch (AggregateException ex)
+            {
+                Logger.Warn($"⚠️ Error al esperar la tarea del servidor WebSocket: {ex.Flatten().InnerException?.Message}");
+            }
+        }
+
+        foreach (var kvp in clients)
+        {
+            try
+            {
+                if (kvp.Value.State is WebSocketState.Open or WebSocketState.CloseReceived)
+                {
+                    kvp.Value.CloseAsync(WebSocketCloseStatus.NormalClosure, "Servidor detenido", CancellationToken.None)
+                        .AsTask().Wait(TimeSpan.FromSeconds(1));
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"⚠️ Error al cerrar cliente WebSocket: {ex.Message}");
+            }
+            finally
+            {
+                kvp.Value.Abort();
+                kvp.Value.Dispose();
+            }
+        }
+
+        clients.Clear();
+        cts?.Dispose();
+        cts = null;
+        listenTask = null;
+
+        Logger.Info("🛑 Servidor WebSocket detenido.");
+    }
+
+    public bool HasClients => !clients.IsEmpty;
+
+    public void Broadcast(string message)
+    {
+        if (!listener.IsListening || string.IsNullOrEmpty(message))
+        {
+            return;
+        }
+
+        var buffer = Encoding.UTF8.GetBytes(message);
+        foreach (var (id, socket) in clients)
+        {
+            if (socket.State != WebSocketState.Open)
+            {
+                continue;
             }
 
-            protected override void OnOpen()
+            _ = SendSafeAsync(id, socket, buffer);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
+        }
+
+        disposed = true;
+        Stop();
+        listener.Close();
+    }
+
+    private async Task AcceptLoopAsync(CancellationToken token)
+    {
+        while (!token.IsCancellationRequested)
+        {
+            HttpListenerContext? context = null;
+
+            try
             {
-                base.OnOpen();
-                SharedCockpitClient.Utils.Logger.Info("👥 Copiloto conectado al servidor WebSocket.");
-                parent.OnClientConnected.Invoke();
+                context = await listener.GetContextAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException)
+            {
+                break;
+            }
+            catch (HttpListenerException ex) when (token.IsCancellationRequested)
+            {
+                Logger.Warn($"⚠️ Ciclo de aceptación detenido: {ex.Message}");
+                break;
+            }
+            catch (Exception ex)
+            {
+                Logger.Error($"⚠️ Error aceptando conexión WebSocket: {ex.Message}");
+                continue;
             }
 
-            protected override void OnClose(CloseEventArgs e)
+            if (context == null)
             {
-                base.OnClose(e);
-                SharedCockpitClient.Utils.Logger.Info("👋 Copiloto desconectado del servidor WebSocket.");
-                parent.OnClientDisconnected.Invoke();
+                continue;
             }
 
-            protected override void OnMessage(MessageEventArgs e)
+            if (!context.Request.IsWebSocketRequest)
             {
-                parent.OnMessage.Invoke(e.Data);
+                context.Response.StatusCode = (int)HttpStatusCode.BadRequest;
+                context.Response.Close();
+                continue;
             }
 
-            protected override void OnError(WebSocketSharp.ErrorEventArgs e)
+            _ = HandleClientAsync(context, token);
+        }
+    }
+
+    private async Task HandleClientAsync(HttpListenerContext context, CancellationToken token)
+    {
+        HttpListenerWebSocketContext? wsContext = null;
+        try
+        {
+            wsContext = await context.AcceptWebSocketAsync(subProtocol: null).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"⚠️ Error al aceptar WebSocket: {ex.Message}");
+            context.Response.StatusCode = (int)HttpStatusCode.InternalServerError;
+            context.Response.Close();
+            return;
+        }
+
+        var socket = wsContext.WebSocket;
+        var clientId = Guid.NewGuid();
+        clients[clientId] = socket;
+
+        Logger.Info("👥 Copiloto conectado al servidor WebSocket.");
+        OnClientConnected.Invoke();
+
+        try
+        {
+            await ReceiveLoopAsync(clientId, socket, token).ConfigureAwait(false);
+        }
+        finally
+        {
+            clients.TryRemove(clientId, out _);
+            if (socket.State != WebSocketState.Closed && socket.State != WebSocketState.Aborted)
             {
-                base.OnError(e);
-                SharedCockpitClient.Utils.Logger.Warn($"⚠️ Error en servidor WebSocket: {e.Message}");
+                try
+                {
+                    await socket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Cierre solicitado", CancellationToken.None).ConfigureAwait(false);
+                }
+                catch
+                {
+                    socket.Abort();
+                }
             }
+
+            socket.Dispose();
+            Logger.Info("👋 Copiloto desconectado del servidor WebSocket.");
+            OnClientDisconnected.Invoke();
+        }
+    }
+
+    private async Task ReceiveLoopAsync(Guid clientId, WebSocket socket, CancellationToken token)
+    {
+        var buffer = new byte[8192];
+
+        try
+        {
+            while (!token.IsCancellationRequested && socket.State == WebSocketState.Open)
+            {
+                var builder = new StringBuilder();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await socket.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
+
+                    if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        return;
+                    }
+
+                    if (result.MessageType != WebSocketMessageType.Text)
+                    {
+                        continue;
+                    }
+
+                    builder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                }
+                while (!result.EndOfMessage);
+
+                if (builder.Length > 0)
+                {
+                    OnMessage.Invoke(builder.ToString());
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Cancelado.
+        }
+        catch (WebSocketException ex)
+        {
+            Logger.Warn($"⚠️ Error en cliente WebSocket ({clientId}): {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"⚠️ Excepción en recepción WebSocket ({clientId}): {ex.Message}");
+        }
+    }
+
+    private async Task SendSafeAsync(Guid clientId, WebSocket socket, byte[] buffer)
+    {
+        try
+        {
+            await socket.SendAsync(new ArraySegment<byte>(buffer), WebSocketMessageType.Text, true, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (WebSocketException ex)
+        {
+            Logger.Warn($"⚠️ Error enviando a cliente WebSocket ({clientId}): {ex.Message}");
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"⚠️ Excepción enviando a cliente WebSocket ({clientId}): {ex.Message}");
         }
     }
 }
