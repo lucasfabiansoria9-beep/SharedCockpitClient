@@ -3,6 +3,7 @@ using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
 using SharedCockpitClient.Network;
+using SharedCockpitClient.FlightData;
 using System.Windows.Forms;
 
 namespace SharedCockpitClient
@@ -14,10 +15,10 @@ namespace SharedCockpitClient
         private TcpClient client = null!;
         private NetworkStream stream = null!;
         private CancellationTokenSource cts = null!;
+        private WebSocketManager wsManager = null!;
+        private SimConnectManager simConnectManager = null!; // ✅ agregado
 
-        private WebSocketManager wsManager = null!; // WebSocket
-
-        // ---- EVENTOS INICIALIZADOS VACÍOS PARA EVITAR NULLABLE WARNINGS ----
+        // ---- EVENTOS INICIALIZADOS VACÍOS ----
         public event Action OnStatusChanged = delegate { };
         public event Action<byte[]> OnDataReceived = delegate { };
 
@@ -32,11 +33,14 @@ namespace SharedCockpitClient
 
             btnStop.Enabled = false;
             txtIp.TextChanged += txtIp_TextChanged!;
+
+            // ✅ Inicializamos SimConnectManager
+            simConnectManager = new SimConnectManager();
         }
 
         private void txtIp_TextChanged(object sender, EventArgs e)
         {
-            // Aquí podrías actualizar la IP si querés
+            // Se puede usar para actualizar la IP
         }
 
         private async void btnHost_Click(object sender, EventArgs e)
@@ -49,11 +53,10 @@ namespace SharedCockpitClient
 
                 isConnected = true;
                 UpdateConnectionButtons();
-
                 UpdateStatus("Servidor iniciado.");
 
-                // Inicializamos WebSocketManager para host
-                wsManager = new WebSocketManager("ws://127.0.0.1:12345");
+                // ✅ Inicializamos WebSocketManager con SimConnectManager
+                wsManager = new WebSocketManager("ws://127.0.0.1:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();
             }
@@ -74,11 +77,10 @@ namespace SharedCockpitClient
 
                 isConnected = true;
                 UpdateConnectionButtons();
-
                 UpdateStatus("Cliente conectado al servidor.");
 
-                // Inicializamos WebSocketManager para cliente
-                wsManager = new WebSocketManager($"ws://{txtIp.Text}:12345");
+                // ✅ Inicializamos WebSocketManager con SimConnectManager
+                wsManager = new WebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();
             }
@@ -134,7 +136,7 @@ namespace SharedCockpitClient
             {
                 isConnected = true;
                 UpdateConnectionButtons();
-                UpdateStatus("WebSocket abierto");
+                UpdateStatus("WebSocket abierto.");
             };
 
             wsManager.OnMessage += msg => UpdateStatus("Mensaje WS: " + msg);
@@ -150,7 +152,7 @@ namespace SharedCockpitClient
             {
                 isConnected = false;
                 UpdateConnectionButtons();
-                UpdateStatus("WebSocket cerrado");
+                UpdateStatus("WebSocket cerrado.");
             };
         }
     }
