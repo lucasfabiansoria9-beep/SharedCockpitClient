@@ -10,6 +10,7 @@ namespace SharedCockpitClient.FlightData;
 public sealed class SimConnectManager : IDisposable
 {
     private const int WM_USER_SIMCONNECT = 0x0402;
+    private const GROUP_PRIORITY GROUP_PRIORITY_HIGHEST = GROUP_PRIORITY.HIGHEST;
 
     private static readonly Dictionary<uint, string> SimConnectExceptionDescriptions = new()
     {
@@ -61,6 +62,9 @@ public sealed class SimConnectManager : IDisposable
     private DoorsStruct _lastDoors = new();
     private GroundSupportStruct _lastGround = new();
 
+    private string? _currentRole;
+    private string? _pendingCameraRole;
+
     public event Action<string>? OnFlightDataReady;
 
     public bool Initialize()
@@ -87,6 +91,14 @@ public sealed class SimConnectManager : IDisposable
 
             LogDefinitionSummary();
 
+            RegisterCameraEvents();
+
+            if (!string.IsNullOrEmpty(_pendingCameraRole))
+            {
+                ApplyCameraRole(_pendingCameraRole);
+                _pendingCameraRole = null;
+            }
+
             RequestData();
 
             Logger.Info("🛰️ Enviando datos reales de vuelo al copiloto...");
@@ -108,6 +120,32 @@ public sealed class SimConnectManager : IDisposable
     {
         _simconnect?.Dispose();
         _simconnect = null;
+    }
+
+    public void SetUserRole(string role)
+    {
+        if (string.IsNullOrWhiteSpace(role))
+        {
+            return;
+        }
+
+        var normalizedRole = role.ToUpperInvariant();
+
+        if (string.Equals(_currentRole, normalizedRole, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _currentRole = normalizedRole;
+
+        if (_simconnect == null)
+        {
+            _pendingCameraRole = normalizedRole;
+            Logger.Info("⌛ Rol recibido. Ajustaremos la cámara en cuanto SimConnect esté listo.");
+            return;
+        }
+
+        ApplyCameraRole(normalizedRole);
     }
 
     private void RequestData()
@@ -357,6 +395,56 @@ public sealed class SimConnectManager : IDisposable
         }
     }
 
+    private void RegisterCameraEvents()
+    {
+        if (_simconnect == null)
+        {
+            return;
+        }
+
+        try
+        {
+            _simconnect.MapClientEventToSimEvent(EVENT_ID.CAMERA_SELECT_PILOT, "VIEW_CAMERA_SELECT_1");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"⚠️ No se pudo mapear el evento de cámara del piloto: {ex.Message}");
+        }
+
+        try
+        {
+            _simconnect.MapClientEventToSimEvent(EVENT_ID.CAMERA_SELECT_COPILOT, "VIEW_CAMERA_SELECT_2");
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"⚠️ No se pudo mapear el evento de cámara del copiloto: {ex.Message}");
+        }
+    }
+
+    private void ApplyCameraRole(string normalizedRole)
+    {
+        if (_simconnect == null)
+        {
+            _pendingCameraRole = normalizedRole;
+            return;
+        }
+
+        if (normalizedRole == "PILOT")
+        {
+            Logger.Info("📸 Ajustando cámara a posición de Piloto...");
+            _simconnect.TransmitClientEvent(0, EVENT_ID.CAMERA_SELECT_PILOT, 0, GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
+        }
+        else if (normalizedRole == "COPILOT")
+        {
+            Logger.Info("📸 Ajustando cámara a posición de Copiloto...");
+            _simconnect.TransmitClientEvent(0, EVENT_ID.CAMERA_SELECT_COPILOT, 0, GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
+        }
+        else
+        {
+            Logger.Warn($"⚠️ Rol desconocido recibido para ajuste de cámara: {normalizedRole}");
+        }
+    }
+
     private bool TryAddSimVar(DEFINITIONS definition, SimVarDefinition simVar, string groupName)
     {
         if (_simconnect == null)
@@ -433,5 +521,16 @@ public sealed class SimConnectManager : IDisposable
         REQUEST_CABIN,
         REQUEST_DOORS,
         REQUEST_GROUNDSUPPORT
+    }
+
+    private enum EVENT_ID
+    {
+        CAMERA_SELECT_PILOT,
+        CAMERA_SELECT_COPILOT
+    }
+
+    private enum GROUP_PRIORITY : uint
+    {
+        HIGHEST = 1
     }
 }

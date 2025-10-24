@@ -108,7 +108,7 @@ public sealed class SyncController : IDisposable
         }
         else
         {
-            ws = new WebSocketManager(webSocketUrl);
+            ws = new WebSocketManager(webSocketUrl, sim);
             ws.OnOpen += () =>
             {
                 Logger.Info("🌐 Conectado al piloto principal.");

@@ -216,9 +216,24 @@ public sealed class WebSocketHost : IDisposable
 
         var socket = wsContext.WebSocket;
         var clientId = Guid.NewGuid();
+
+        var role = clients.IsEmpty ? "PILOT" : "COPILOT";
+
         clients[clientId] = socket;
 
         Logger.Info("👥 Copiloto conectado al servidor WebSocket.");
+        Logger.Info($"🧑‍✈️ Cliente asignado como {role}");
+
+        try
+        {
+            var payload = Encoding.UTF8.GetBytes($"ROLE:{role}");
+            await socket.SendAsync(new ArraySegment<byte>(payload), WebSocketMessageType.Text, true, token).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            Logger.Warn($"⚠️ No se pudo notificar el rol al cliente ({clientId}): {ex.Message}");
+        }
+
         OnClientConnected.Invoke();
 
         try

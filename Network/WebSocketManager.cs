@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.FlightData;
 using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network;
@@ -10,19 +11,22 @@ namespace SharedCockpitClient.Network;
 public class WebSocketManager : IDisposable
 {
     private readonly string url;
+    private readonly SimConnectManager sim;
     private ClientWebSocket? client;
     private CancellationTokenSource? cts;
     private Task? workerTask;
     private bool disposed;
+    private string userRole = string.Empty;
 
     public event Action OnOpen = delegate { };
     public event Action<string> OnMessage = delegate { };
     public event Action<string> OnError = delegate { };
     public event Action OnClose = delegate { };
 
-    public WebSocketManager(string serverUrl)
+    public WebSocketManager(string serverUrl, SimConnectManager simConnectManager)
     {
         url = serverUrl ?? throw new ArgumentNullException(nameof(serverUrl));
+        sim = simConnectManager ?? throw new ArgumentNullException(nameof(simConnectManager));
     }
 
     public void Connect()
@@ -199,7 +203,7 @@ public class WebSocketManager : IDisposable
 
                 if (builder.Length > 0)
                 {
-                    OnMessage.Invoke(builder.ToString());
+                    HandleIncomingMessage(builder.ToString());
                 }
             }
         }
@@ -230,5 +234,31 @@ public class WebSocketManager : IDisposable
             Logger.Warn($"Error enviando mensaje WebSocket: {ex.Message}");
             OnError.Invoke(ex.Message);
         }
+    }
+
+    private void HandleIncomingMessage(string message)
+    {
+        if (message.StartsWith("ROLE:", StringComparison.OrdinalIgnoreCase))
+        {
+            var assignedRole = message.Substring("ROLE:".Length).Trim();
+            if (!string.IsNullOrEmpty(assignedRole))
+            {
+                var normalizedRole = assignedRole.ToUpperInvariant();
+                if (!string.Equals(userRole, normalizedRole, StringComparison.OrdinalIgnoreCase))
+                {
+                    userRole = normalizedRole;
+                    Logger.Info($"🪶 Rol asignado localmente: {userRole}");
+                    sim.SetUserRole(userRole);
+                }
+                else
+                {
+                    userRole = normalizedRole;
+                }
+            }
+
+            return;
+        }
+
+        OnMessage.Invoke(message);
     }
 }
