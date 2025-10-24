@@ -126,10 +126,17 @@ public sealed class SimConnectManager : IDisposable
     {
         if (string.IsNullOrWhiteSpace(role))
         {
+            Logger.Warn("[SimConnect] Rol vacío recibido. No se ajustará la cámara.");
             return;
         }
 
         var normalizedRole = role.ToUpperInvariant();
+
+        if (normalizedRole != "PILOT" && normalizedRole != "COPILOT")
+        {
+            Logger.Warn($"[SimConnect] Rol desconocido recibido: {normalizedRole}. No se ajustará la cámara.");
+            return;
+        }
 
         if (string.Equals(_currentRole, normalizedRole, StringComparison.OrdinalIgnoreCase))
         {
@@ -141,7 +148,7 @@ public sealed class SimConnectManager : IDisposable
         if (_simconnect == null)
         {
             _pendingCameraRole = normalizedRole;
-            Logger.Info("⌛ Rol recibido. Ajustaremos la cámara en cuanto SimConnect esté listo.");
+            Logger.Info("[SimConnect] Rol recibido. Ajustaremos la cámara cuando SimConnect esté listo.");
             return;
         }
 
@@ -423,25 +430,29 @@ public sealed class SimConnectManager : IDisposable
 
     private void ApplyCameraRole(string normalizedRole)
     {
-        if (_simconnect == null)
-        {
-            _pendingCameraRole = normalizedRole;
-            return;
-        }
-
         if (normalizedRole == "PILOT")
         {
-            Logger.Info("📸 Ajustando cámara a posición de Piloto...");
+            if (_simconnect == null)
+            {
+                _pendingCameraRole = normalizedRole;
+                Logger.Info("[SimConnect] Conexión no disponible. Se ajustará la cámara del piloto cuando esté activa.");
+                return;
+            }
+
             _simconnect.TransmitClientEvent(0, EVENT_ID.CAMERA_SELECT_PILOT, 0, GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
+            Logger.Info("[SimConnect] Cámara ajustada para PILOT (vista izquierda)");
         }
         else if (normalizedRole == "COPILOT")
         {
-            Logger.Info("📸 Ajustando cámara a posición de Copiloto...");
+            if (_simconnect == null)
+            {
+                _pendingCameraRole = normalizedRole;
+                Logger.Info("[SimConnect] Conexión no disponible. Se ajustará la cámara del copiloto cuando esté activa.");
+                return;
+            }
+
             _simconnect.TransmitClientEvent(0, EVENT_ID.CAMERA_SELECT_COPILOT, 0, GROUP_PRIORITY_HIGHEST, SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
-        }
-        else
-        {
-            Logger.Warn($"⚠️ Rol desconocido recibido para ajuste de cámara: {normalizedRole}");
+            Logger.Info("[SimConnect] Cámara ajustada para COPILOT (vista derecha)");
         }
     }
 
