@@ -1,4 +1,7 @@
 using System;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -12,7 +15,7 @@ public sealed class SyncController : IDisposable
     private readonly SimConnectManager sim;
 
     private bool isHost = true;
-    private string webSocketUrl = "ws://localhost:8081";
+    private string webSocketUrl = string.Empty;
     private bool warnedNoConnection;
 
     private WebSocketManager? ws;
@@ -66,27 +69,35 @@ public sealed class SyncController : IDisposable
         Logger.Info("Selecciona modo de operación:");
         Logger.Info("1) Host (piloto principal)");
         Logger.Info("2) Cliente (copiloto)");
-        Console.Write("Opcin [1]: ");
+        Console.Write("> ");
 
         var option = Console.ReadLine();
-        isHost = option?.Trim() == "2" ? false : true;
+        isHost = option?.Trim() != "2";
 
         if (isHost)
         {
-            Logger.Info("➡️  Modo HOST seleccionado. Este equipo iniciará el servidor WebSocket en el puerto 8081.");
-            Logger.Info("   Pide al copiloto que se conecte a ws://<tu-ip>:8081");
+            var localIp = GetLocalIpAddress();
+
+            Logger.Info("🚀 Modo HOST iniciado.");
+            Logger.Info($"Tu dirección local es: {localIp}");
+            Logger.Info($"Pídele al copiloto que se conecte a: ws://{localIp}:8081");
+            Logger.Info("Esperando conexión del copiloto...");
+
+            sim.SetUserRole("PILOT");
         }
         else
         {
-            Console.Write("IP o hostname del piloto principal [localhost]: ");
+            Logger.Info("🌍 Ingresá la IP del piloto:");
+            Console.Write("> ");
+
             var hostInput = Console.ReadLine();
             if (string.IsNullOrWhiteSpace(hostInput))
             {
-                hostInput = "localhost";
+                hostInput = "127.0.0.1";
             }
 
             webSocketUrl = $"ws://{hostInput.Trim()}:8081";
-            Logger.Info($"➡️  Modo CLIENTE seleccionado. Intentando conectar a {webSocketUrl}");
+            Logger.Info($"🌍 Intentando conectar con {webSocketUrl}...");
         }
 
         Logger.Info(string.Empty);
@@ -97,12 +108,15 @@ public sealed class SyncController : IDisposable
         if (isHost)
         {
             hostServer = new WebSocketHost(8081);
+            hostServer.ReservePilotRole();
             hostServer.OnClientConnected += () =>
             {
-                Logger.Info("✅ Copiloto conectado. Comenzaremos a enviar los datos de vuelo en cuanto cambien.");
                 warnedNoConnection = false;
             };
-            hostServer.OnClientDisconnected += () => Logger.Info("ℹ️ Copiloto desconectado del servidor.");
+            hostServer.OnClientDisconnected += () =>
+            {
+                warnedNoConnection = false;
+            };
             hostServer.OnMessage += OnWebSocketMessage;
             hostServer.Start();
         }
@@ -111,13 +125,36 @@ public sealed class SyncController : IDisposable
             ws = new WebSocketManager(webSocketUrl, sim);
             ws.OnOpen += () =>
             {
-                Logger.Info("🌐 Conectado al piloto principal.");
+                Logger.Info("✅ Conectado correctamente al host.");
                 warnedNoConnection = false;
             };
-            ws.OnError += (msg) => Logger.Warn("⚠️ Error WebSocket: " + msg);
-            ws.OnClose += () => Logger.Info("🔌 Conexión WebSocket cerrada");
+            ws.OnError += (msg) =>
+            {
+                Logger.Error("❌ No se pudo conectar al host. Verificá la IP o que el piloto esté en modo HOST.");
+
+                if (!string.IsNullOrWhiteSpace(msg))
+                {
+                    Logger.Warn("Detalles del error: " + msg);
+                }
+            };
+            ws.OnClose += () => Logger.Warn("🔌 Conexión WebSocket cerrada.");
             ws.OnMessage += OnWebSocketMessage;
             ws.Connect();
+        }
+    }
+
+    private static string GetLocalIpAddress()
+    {
+        try
+        {
+            return Dns.GetHostAddresses(Dns.GetHostName())
+                .FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)
+                ?.ToString() ?? "127.0.0.1";
+        }
+        catch (SocketException ex)
+        {
+            Logger.Warn($"⚠️ No se pudo obtener la IP local: {ex.Message}");
+            return "127.0.0.1";
         }
     }
 
