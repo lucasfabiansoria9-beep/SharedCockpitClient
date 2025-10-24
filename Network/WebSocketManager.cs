@@ -68,14 +68,7 @@ namespace SharedCockpitClient.Network
 
             disposed = true;
 
-            try
-            {
-                cts?.Cancel();
-            }
-            catch (ObjectDisposedException)
-            {
-                // Ignorar cancelación ya cerrada
-            }
+            try { cts?.Cancel(); } catch { }
 
             if (client != null)
             {
@@ -83,7 +76,6 @@ namespace SharedCockpitClient.Network
                 {
                     if (client.State is WebSocketState.Open or WebSocketState.CloseReceived)
                     {
-                        // ✅ .AsTask() eliminado: no necesario en .NET 8
                         client.CloseAsync(
                             WebSocketCloseStatus.NormalClosure,
                             "Cierre solicitado",
@@ -101,14 +93,7 @@ namespace SharedCockpitClient.Network
                 }
             }
 
-            try
-            {
-                workerTask?.Wait(TimeSpan.FromSeconds(2));
-            }
-            catch (AggregateException ex)
-            {
-                Logger.Warn($"⚠️ Error al detener tarea WebSocket: {ex.Flatten().InnerException?.Message}");
-            }
+            try { workerTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
 
             cts?.Dispose();
             client = null;
@@ -118,16 +103,25 @@ namespace SharedCockpitClient.Network
             Logger.Info("🔌 Conexión WebSocket cerrada correctamente.");
         }
 
-        public void Dispose()
-        {
-            Close();
-        }
+        public void Dispose() => Close();
 
         private async Task RunAsync(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
             {
                 using var ws = new ClientWebSocket();
+
+                // 🔧 Desactiva completamente la compresión para compatibilidad universal
+                try
+                {
+                    ws.Options.SetRequestHeader("Sec-WebSocket-Extensions", ""); // Elimina permessage-deflate
+                }
+                catch { /* En algunos sistemas SetRequestHeader puede fallar, se ignora */ }
+
+                ws.Options.DangerousDeflateOptions = null; // Evita frames comprimidos
+                ws.Options.AddSubProtocol("sharedcockpit"); // Handshake limpio
+                ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
+
                 client = ws;
 
                 try
@@ -165,14 +159,8 @@ namespace SharedCockpitClient.Network
                 if (ws.State != WebSocketState.Open && ws.State != WebSocketState.Connecting)
                     OnClose.Invoke();
 
-                try
-                {
-                    await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
+                try { await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false); }
+                catch (OperationCanceledException) { break; }
 
                 Logger.Warn("🔁 Intentando reconectar al servidor WebSocket...");
             }
@@ -208,7 +196,7 @@ namespace SharedCockpitClient.Network
             }
             catch (OperationCanceledException)
             {
-                // Cancelado.
+                // Cancelado
             }
             catch (WebSocketException ex)
             {

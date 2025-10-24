@@ -84,15 +84,23 @@ namespace SharedCockpitClient.Network
                 sim.SetUserRole("PILOT");
             }
             else
-            {
+{
                 Logger.Info("🌍 Ingresá la IP del piloto:");
                 Console.Write("> ");
 
-                var hostInput = Console.ReadLine();
+                var hostInput = Console.ReadLine()?.Trim();
+
                 if (string.IsNullOrWhiteSpace(hostInput))
                     hostInput = "127.0.0.1";
 
-                webSocketUrl = $"ws://{hostInput.Trim()}:8081";
+                // ✅ Si el usuario ya puso el puerto, no agregamos otro
+                if (!hostInput.StartsWith("ws://"))
+                    hostInput = "ws://" + hostInput;
+
+                if (!hostInput.Contains(":"))
+                    hostInput += ":8081";
+
+                webSocketUrl = hostInput;
                 Logger.Info($"🌍 Intentando conectar con {webSocketUrl}...");
             }
 
@@ -104,33 +112,39 @@ namespace SharedCockpitClient.Network
             if (isHost)
             {
                 hostServer = new WebSocketHost(8081);
-                hostServer.OnClientConnected += () =>
+
+                hostServer.OnClientConnected += (id) =>
                 {
                     Logger.Info("🟢 Copiloto conectado correctamente.");
                     warnedNoConnection = false;
                 };
-                hostServer.OnClientDisconnected += () =>
+
+                hostServer.OnClientDisconnected += (id) =>
                 {
                     Logger.Warn("🔴 Copiloto desconectado.");
                     warnedNoConnection = false;
                 };
+
                 hostServer.OnMessage += OnWebSocketMessage;
                 hostServer.Start();
             }
             else
             {
                 ws = new WebSocketManager(webSocketUrl, sim);
+
                 ws.OnOpen += () =>
                 {
                     Logger.Info("✅ Conectado correctamente al host (piloto).");
                     warnedNoConnection = false;
                 };
+
                 ws.OnError += (msg) =>
                 {
                     Logger.Error("❌ No se pudo conectar al host. Verificá la IP o que el piloto esté en modo HOST.");
                     if (!string.IsNullOrWhiteSpace(msg))
                         Logger.Warn("Detalles del error: " + msg);
                 };
+
                 ws.OnClose += () => Logger.Warn("🔌 Conexión WebSocket cerrada.");
                 ws.OnMessage += OnWebSocketMessage;
                 ws.Connect();
