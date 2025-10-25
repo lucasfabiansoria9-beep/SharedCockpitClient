@@ -272,4 +272,29 @@ public sealed class SimConnectManager : IDisposable
         IntPtr hMenu,
         IntPtr hInstance,
         IntPtr lpParam);
+  
+    public void NotifyMockSnapshot(SimStateSnapshot snapshot)
+    {
+        try
+        {
+            lock (_stateLock)
+            {
+                _latestSnapshot = snapshot.Clone();
+            }
+
+            OnSnapshot?.Invoke(snapshot.Clone());
+
+            var state = snapshot.ToDictionary();
+            var payload = _diffEngine.ComputeDiff(_localRole, state);
+            if (!string.IsNullOrWhiteSpace(payload))
+            {
+                OnSimStateChanged?.Invoke(payload);
+            }
+        }
+        catch (Exception ex)
+        {
+            Logger.Error($"Error en NotifyMockSnapshot: {ex.Message}");
+        }
+    }
+
 }

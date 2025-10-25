@@ -5,40 +5,53 @@ using System;
 using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
+using System.Threading.Tasks;
 
 namespace SharedCockpitClient
 {
     internal class Program
     {
-        static async Task Main()
+        static async Task Main(string[] args)
         {
-            // 🧱 Fuerza la alerta del firewall o agrega la regla automáticamente
+            bool useMockSim = args.Length > 0 && args[0].Equals("--mock-sim", StringComparison.OrdinalIgnoreCase);
             EnsureFirewallRuleOrPrompt(8081);
 
             Logger.Info("🛫 Iniciando SharedCockpitClient...");
-            using var sync = new SyncController(new SimConnectManager());
-            await sync.RunAsync();
+
+            if (useMockSim)
+            {
+                Logger.Info("🧪 Modo de simulación interna activo - no se usará SimConnect.");
+                Logger.Info("🧪 Generando datos simulados de vuelo...");
+
+                // No crear ni usar SimConnectManager real
+                var mockManager = new SimConnectManager();
+                var mock = new SimDataMock(mockManager);
+                mock.Start(); // genera snapshots ficticios
+
+                using var sync = new SyncController(mockManager);
+                await sync.RunAsync();
+            }
+            else
+            {
+                using var sim = new SimConnectManager();
+                using var sync = new SyncController(sim);
+                await sync.RunAsync();
+            }
         }
 
-        /// <summary>
-        /// Asegura que el firewall de Windows permita conexiones del SharedCockpitClient.
-        /// Muestra la alerta clásica la primera vez, o agrega la regla automáticamente.
-        /// </summary>
         static void EnsureFirewallRuleOrPrompt(int port)
         {
             try
             {
-                // 🎯 Intenta abrir un socket temporal (dispara la alerta de Windows Firewall si no hay permiso)
                 using var listener = new TcpListener(IPAddress.Any, port);
                 listener.Start();
                 listener.Stop();
             }
             catch (SocketException)
             {
-                // 🔒 Si el firewall bloquea, Windows mostrará automáticamente el cartel “Permitir acceso”.
+                // Windows mostrará el aviso de firewall automáticamente
             }
 
-            // 🔁 Si no se muestra la alerta (por antivirus o políticas), agregamos la regla manualmente.
             try
             {
                 var process = new Process();
@@ -46,7 +59,7 @@ namespace SharedCockpitClient
                 process.StartInfo.Arguments =
                     $"advfirewall firewall add rule name=\"SharedCockpitClient\" " +
                     $"dir=in action=allow protocol=TCP localport={port}";
-                process.StartInfo.Verb = "runas"; // Pide elevación (UAC)
+                process.StartInfo.Verb = "runas";
                 process.StartInfo.UseShellExecute = true;
                 process.StartInfo.CreateNoWindow = true;
                 process.Start();
@@ -54,7 +67,7 @@ namespace SharedCockpitClient
             }
             catch
             {
-                // El usuario puede cancelar el UAC, no interrumpe la app.
+                // No interrumpir si el usuario cancela
             }
         }
     }
