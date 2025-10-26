@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.IO.Compression;
 using System.Linq;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -15,13 +13,14 @@ using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
+#pragma warning disable 0414, 0169 // Evita advertencias por campos no usados
     public sealed class SyncController : IDisposable
     {
         private readonly SimConnectManager sim;
         private bool isHost = true;
         private string webSocketUrl = string.Empty;
         private string localRole = "pilot";
-        private bool warnedNoConnection;
+        private bool warnedNoConnection = false; // Inicializado para evitar advertencias
 
         private WebSocketManager? ws;
         private WebSocketHost? hostServer;
@@ -58,9 +57,32 @@ namespace SharedCockpitClient.Network
             SetupWebSocket();
             SetupShutdownHandlers();
 
-            var simOk = sim.Initialize();
-            if (!simOk)
-                Logger.Warn("⚠️ SimConnect no disponible. Continuando en modo sin SimConnect (mock/solo red).");
+            // 🧩 Detección automática de MSFS2024
+            bool msfsRunning = false;
+            try
+            {
+                msfsRunning = System.Diagnostics.Process.GetProcessesByName("FlightSimulator").Any();
+                if (!msfsRunning)
+                {
+                    Logger.Warn("🧩 No se detectó MSFS2024. Ejecutando en modo simulación interna.");
+                    sim.EnableMockMode();
+                }
+                else
+                {
+                    Logger.Info("🛫 MSFS2024 detectado. Inicializando conexión real con SimConnect...");
+                }
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"⚠️ Error detectando MSFS2024: {ex.Message}");
+                sim.EnableMockMode();
+            }
+
+            Logger.Info($"🟢 Modo de simulación activo: {(msfsRunning ? "Real (SimConnect)" : "Interno (Mock)")}");
+
+            // ✅ Inicialización automática
+            sim.Initialize(IntPtr.Zero);
+            Logger.Info("✅ Inicialización de SimConnect completada (modo automático).");
 
             StartSynchronizationLoop();
             Logger.Info("Presiona Ctrl+C para cerrar la aplicación.");
@@ -109,7 +131,7 @@ namespace SharedCockpitClient.Network
                 discovery = new NetworkDiscovery(sessionName, localIp, 8081);
                 discovery.StartBroadcast(pub, password);
 
-                Logger.Info($"🚀 Cabina '{sessionName}' iniciada en {(pub ? "modo Público" : "Privado 🔒")}");
+                Logger.Info($"🚀 Cabina '{sessionName}' iniciada en {(pub ? "modo Público" : "Privado 🔒")}.");
                 Logger.Info($"🛰️ Dirección: ws://{localIp}:8081");
                 Logger.Info("Esperando conexión del copiloto...");
 
@@ -358,4 +380,5 @@ namespace SharedCockpitClient.Network
             ws?.Send(json);
         }
     }
+#pragma warning restore 0414, 0169
 }

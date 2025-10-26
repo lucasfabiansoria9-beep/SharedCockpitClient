@@ -1,65 +1,71 @@
 using System;
 using System.Threading;
-using System.Threading.Tasks;
-using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.FlightData
 {
-    /// <summary>
-    /// Genera datos falsos de vuelo cuando no se usa SimConnect (modo mock).
-    /// </summary>
-    public sealed class SimDataMock
+    public class SimDataMock
     {
-        private readonly SimConnectManager simManager;
-        private readonly Random random = new();
-        private CancellationTokenSource? cts;
+        private readonly SimConnectManager manager;
+        private readonly Random rng = new();
+        private Thread? worker;
+        private bool running;
 
         public SimDataMock(SimConnectManager manager)
         {
-            simManager = manager;
+            this.manager = manager ?? throw new ArgumentNullException(nameof(manager));
         }
 
         public void Start()
         {
-            Stop();
-            cts = new CancellationTokenSource();
-            var token = cts.Token;
+            if (running) return;
+            running = true;
 
-            Task.Run(async () =>
+            worker = new Thread(() =>
             {
-                double altitude = 1000;
-                double heading = 90;
-                double airspeed = 120;
-                bool lights = false;
-
-                Logger.Info("🧪 Generando datos simulados de vuelo...");
-
-                while (!token.IsCancellationRequested)
+                while (running)
                 {
-                    // Simula pequeños cambios constantes
-                    altitude += random.NextDouble() * 10 - 5;
-                    heading = (heading + random.NextDouble() * 2 - 1 + 360) % 360;
-                    airspeed += random.NextDouble() * 0.5 - 0.25;
-                    lights = random.NextDouble() > 0.97 ? !lights : lights;
-
                     var snapshot = new SimStateSnapshot
                     {
-                        Position = new PositionStruct { Latitude = -34.9, Longitude = -57.9, Altitude = altitude },
-                        Attitude = new AttitudeStruct { Pitch = 2, Bank = 0.5, Heading = heading },
-                        Speed = new SpeedStruct { IndicatedAirspeed = airspeed, VerticalSpeed = 200, GroundSpeed = 115 },
-                        Systems = new SystemsStruct { LandingLight = lights ? 1 : 0 },
-                        Controls = new ControlsStruct { Throttle = 0.8, Flaps = 0.2 }
+                        Controls = new ControlsStruct
+                        {
+                            Throttle = rng.NextDouble(),
+                            Flaps = rng.NextDouble(),
+                            Elevator = rng.NextDouble() * 2 - 1,
+                            Aileron = rng.NextDouble() * 2 - 1,
+                            Rudder = rng.NextDouble() * 2 - 1,
+                            ParkingBrake = rng.Next(0, 2),
+                            Spoilers = rng.NextDouble()
+                        },
+                        Cabin = new CabinStruct
+                        {
+                            LandingGearDown = rng.Next(0, 2),
+                            SpoilersDeployed = rng.NextDouble(),
+                            AutopilotOn = rng.Next(0, 2),
+                            AutopilotAltitude = 1000 + rng.NextDouble() * 5000,
+                            AutopilotHeading = rng.NextDouble() * 360
+                        },
+                        Environment = new EnvironmentStruct
+                        {
+                            AmbientTemperature = 20 + rng.NextDouble() * 15,
+                            BarometricPressure = 29.92,
+                            WindVelocity = rng.NextDouble() * 30,
+                            WindDirection = rng.NextDouble() * 360
+                        }
                     };
 
-                    simManager.NotifyMockSnapshot(snapshot);
-                    await Task.Delay(500, token);
+                    // ✅ Enviar snapshot mediante método público (no invocar evento directo)
+                    manager.InjectSnapshot(snapshot);
+                    Thread.Sleep(1000);
                 }
-            }, token);
+            })
+            { IsBackground = true };
+            worker.Start();
         }
 
         public void Stop()
         {
-            try { cts?.Cancel(); } catch { }
+            running = false;
+            worker?.Join();
         }
     }
 }

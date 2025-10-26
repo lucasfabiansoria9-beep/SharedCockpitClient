@@ -5,22 +5,22 @@ using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using System.Threading;
+using System.Threading.Tasks;
 using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
     /// <summary>
-    /// Permite descubrir automáticamente cabinas compartidas (hosts) en la red local.
+    /// Descubre automáticamente cabinas compartidas (hosts) en la red local.
     /// Soporta sesiones públicas y privadas con contraseña local.
     /// </summary>
-    public class NetworkDiscovery
+    public class NetworkDiscovery : IDisposable
     {
         private readonly UdpClient udpClient;
         private readonly string sessionName;
         private readonly string localIp;
         private readonly int wsPort;
         private readonly ConcurrentDictionary<string, string> passwords = new(); // name -> password
-        private bool isBroadcasting;
         private CancellationTokenSource? broadcastToken;
         private CancellationTokenSource? listenToken;
 
@@ -35,11 +35,10 @@ namespace SharedCockpitClient.Network
         }
 
         /// <summary>
-        /// El host empieza a anunciar su sesión.
+        /// El host comienza a anunciar su sesión en la red local.
         /// </summary>
         public void StartBroadcast(bool isPublic, string password)
         {
-            isBroadcasting = true;
             passwords[sessionName] = password;
             broadcastToken = new CancellationTokenSource();
             var token = broadcastToken.Token;
@@ -64,18 +63,21 @@ namespace SharedCockpitClient.Network
                         var bytes = Encoding.UTF8.GetBytes(json);
                         await udpClient.SendAsync(bytes, bytes.Length, endpoint);
 
-                        await Task.Delay(2000, token); // cada 2 seg
+                        await Task.Delay(2000, token); // cada 2 segundos
                     }
                     catch (Exception ex)
                     {
-                        Logger.Warn($"⚠️ Error en broadcast LAN: {ex.Message}");
+                        if (!token.IsCancellationRequested)
+                            Logger.Warn($"⚠️ Error en broadcast LAN: {ex.Message}");
                     }
                 }
-            });
+            }, token);
+
+            Logger.Info($"📡 Broadcasting activo: {sessionName} ({(isPublic ? "pública" : "privada")})");
         }
 
         /// <summary>
-        /// El copiloto empieza a escuchar anuncios LAN.
+        /// El copiloto comienza a escuchar anuncios LAN.
         /// </summary>
         public void StartListening()
         {
@@ -93,13 +95,19 @@ namespace SharedCockpitClient.Network
                     {
                         var result = await listener.ReceiveAsync(token);
                         var json = Encoding.UTF8.GetString(result.Buffer);
-                        using var doc = JsonDocument.Parse(json);
 
-                        var name = doc.RootElement.GetProperty("name").GetString() ?? "CabinaDesconocida";
-                        var ip = doc.RootElement.GetProperty("ip").GetString() ?? "0.0.0.0";
-                        var isPublic = doc.RootElement.TryGetProperty("isPublic", out var p) && p.GetBoolean();
+                        using var doc = JsonDocument.Parse(json);
+                        var root = doc.RootElement;
+
+                        var name = root.GetProperty("name").GetString() ?? "CabinaDesconocida";
+                        var ip = root.GetProperty("ip").GetString() ?? "0.0.0.0";
+                        var isPublic = root.TryGetProperty("isPublic", out var p) && p.GetBoolean();
 
                         OnHostDiscovered?.Invoke(ip, name, isPublic);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Cancel normal al detener la escucha
                     }
                     catch (Exception ex)
                     {
@@ -107,28 +115,37 @@ namespace SharedCockpitClient.Network
                             Logger.Warn($"⚠️ Error escuchando broadcast: {ex.Message}");
                     }
                 }
-            });
+            }, token);
+
+            Logger.Info("👂 Escuchando broadcasts LAN...");
         }
 
         /// <summary>
-        /// Valida la contraseña para una sesión privada (solo local, sin red).
+        /// Valida la contraseña para una sesión privada.
         /// </summary>
         public bool ValidatePassword(string session, string entered)
         {
-            if (passwords.TryGetValue(session, out var correct))
-                return correct == entered;
-            return false;
+            return passwords.TryGetValue(session, out var correct) && correct == entered;
         }
 
+        /// <summary>
+        /// Detiene todas las tareas activas de broadcast y escucha.
+        /// </summary>
         public void Stop()
         {
             try
             {
                 broadcastToken?.Cancel();
                 listenToken?.Cancel();
-                udpClient.Close();
+                udpClient?.Close();
+                Logger.Info("🛑 NetworkDiscovery detenido correctamente.");
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Logger.Warn($"⚠️ Error al detener NetworkDiscovery: {ex.Message}");
+            }
         }
+
+        public void Dispose() => Stop();
     }
 }
