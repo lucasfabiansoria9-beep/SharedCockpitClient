@@ -1,59 +1,201 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace SharedCockpitClient.FlightData
 {
-    /// <summary>
-    /// Clase base que representa un conjunto de datos SimConnect o variables
-    /// definidas en la simulación. Se utiliza para registrar, mapear o aplicar comandos
-    /// de vuelo sincrónicos entre cliente y host.
-    /// </summary>
-    public class SimDataDefinition
+    public enum SimDataType
     {
-        public string Name { get; set; } = string.Empty;              // nombre de variable
-        public string Units { get; set; } = string.Empty;             // unidades (ft, deg, knots, etc.)
-        public double Value { get; set; }                             // valor actual numérico
-        public string? Type { get; set; }                             // tipo de variable (SimVar, Event, etc.)
-        public DateTime Timestamp { get; set; } = DateTime.UtcNow;    // último update
+        Float64,
+        Float32,
+        Int32,
+        Bool,
+        String256
+    }
 
-        public SimDataDefinition() { }
+    public sealed record SimVarDescriptor(
+        string Path,
+        string Name,
+        string Units,
+        SimDataType DataType,
+        bool Writable,
+        string Category,
+        int? Index = null,
+        string? EventWrite = null,
+        double? MinDelta = null)
+    {
+        public string DefinitionKey => Index.HasValue ? $"{Name}:{Index.Value}" : Name;
+    }
 
-        public SimDataDefinition(string name, string units, double value, string? type = null)
+    public sealed record SimEventDescriptor(string Path, string EventName, string Category);
+
+    /// <summary>
+    /// Tabla centralizada de SimVars y SimEvents utilizados por el proyecto.
+    /// </summary>
+    public static class SimDataDefinition
+    {
+        private static readonly Lazy<IReadOnlyList<SimVarDescriptor>> _allVars = new(() => BuildVarList());
+        private static readonly Lazy<IReadOnlyDictionary<string, SimVarDescriptor>> _varsByPath
+            = new(() => _allVars.Value.ToDictionary(v => v.Path, v => v, StringComparer.OrdinalIgnoreCase));
+
+        private static readonly Lazy<IReadOnlyDictionary<string, SimEventDescriptor>> _eventsByPath
+            = new(() => BuildEvents().ToDictionary(e => e.Path, e => e, StringComparer.OrdinalIgnoreCase));
+
+        public static IReadOnlyList<SimVarDescriptor> AllSimVars => _allVars.Value;
+
+        public static IReadOnlyDictionary<string, SimVarDescriptor> VarsByPath => _varsByPath.Value;
+
+        public static IReadOnlyDictionary<string, SimEventDescriptor> EventsByPath => _eventsByPath.Value;
+
+        public static bool TryGetVar(string path, out SimVarDescriptor descriptor)
         {
-            Name = name;
-            Units = units;
-            Value = value;
-            Type = type;
-            Timestamp = DateTime.UtcNow;
+            return VarsByPath.TryGetValue(path, out descriptor!);
         }
 
-        public SimDataDefinition Clone()
+        public static bool TryGetEvent(string path, out SimEventDescriptor descriptor)
         {
-            return new SimDataDefinition
+            return EventsByPath.TryGetValue(path, out descriptor!);
+        }
+
+        private static IReadOnlyList<SimVarDescriptor> BuildVarList()
+        {
+            var vars = new List<SimVarDescriptor>
             {
-                Name = this.Name,
-                Units = this.Units,
-                Value = this.Value,
-                Type = this.Type,
-                Timestamp = DateTime.UtcNow
+                // ===== Controles =====
+                new("Controls.Throttle[1]", "GENERAL ENG THROTTLE LEVER POSITION:1", "Percent", SimDataType.Float64, true, "Controls", 1, MinDelta: 0.01),
+                new("Controls.Throttle[2]", "GENERAL ENG THROTTLE LEVER POSITION:2", "Percent", SimDataType.Float64, true, "Controls", 2, MinDelta: 0.01),
+                new("Controls.Propeller[1]", "GENERAL ENG PROP LEVER POSITION:1", "Percent", SimDataType.Float64, true, "Controls", 1, MinDelta: 0.01),
+                new("Controls.Propeller[2]", "GENERAL ENG PROP LEVER POSITION:2", "Percent", SimDataType.Float64, true, "Controls", 2, MinDelta: 0.01),
+                new("Controls.Mixture[1]", "GENERAL ENG MIXTURE LEVER POSITION:1", "Percent", SimDataType.Float64, true, "Controls", 1, MinDelta: 0.01),
+                new("Controls.Mixture[2]", "GENERAL ENG MIXTURE LEVER POSITION:2", "Percent", SimDataType.Float64, true, "Controls", 2, MinDelta: 0.01),
+                new("Controls.Aileron", "AILERON POSITION", "Position", SimDataType.Float64, true, "Controls", MinDelta: 0.005),
+                new("Controls.Elevator", "ELEVATOR POSITION", "Position", SimDataType.Float64, true, "Controls", MinDelta: 0.005),
+                new("Controls.Rudder", "RUDDER POSITION", "Position", SimDataType.Float64, true, "Controls", MinDelta: 0.005),
+                new("Controls.ElevatorTrim", "ELEVATOR TRIM POSITION", "Radians", SimDataType.Float64, true, "Controls", MinDelta: 0.002),
+                new("Controls.AileronTrim", "AILERON TRIM", "Radians", SimDataType.Float64, true, "Controls", MinDelta: 0.002),
+                new("Controls.RudderTrim", "RUDDER TRIM", "Radians", SimDataType.Float64, true, "Controls", MinDelta: 0.002),
+                new("Controls.BrakeParking", "BRAKE PARKING POSITION", "Bool", SimDataType.Bool, true, "Brakes"),
+                new("Controls.Flaps.Handle", "FLAPS HANDLE INDEX", "Number", SimDataType.Int32, true, "FlightControls"),
+                new("Controls.Spoilers.Handle", "SPOILERS HANDLE POSITION", "Percent", SimDataType.Float64, true, "FlightControls", MinDelta: 0.01),
+                new("Controls.Gear.Handle", "GEAR HANDLE POSITION", "Bool", SimDataType.Bool, true, "Gear"),
+
+                // ===== Motor / Engine =====
+                new("Systems.Engine[1].Starter", "GENERAL ENG STARTER:1", "Bool", SimDataType.Bool, true, "Engine", 1),
+                new("Systems.Engine[2].Starter", "GENERAL ENG STARTER:2", "Bool", SimDataType.Bool, true, "Engine", 2),
+                new("Systems.Engine[1].Combustion", "GENERAL ENG COMBUSTION:1", "Bool", SimDataType.Bool, false, "Engine", 1),
+                new("Systems.Engine[2].Combustion", "GENERAL ENG COMBUSTION:2", "Bool", SimDataType.Bool, false, "Engine", 2),
+                new("Systems.Engine[1].OilPressure", "ENG OIL PRESSURE:1", "Psi", SimDataType.Float64, false, "Engine", 1),
+                new("Systems.Engine[2].OilPressure", "ENG OIL PRESSURE:2", "Psi", SimDataType.Float64, false, "Engine", 2),
+                new("Systems.Engine[1].N1", "TURB ENG N1:1", "Percent", SimDataType.Float64, false, "Engine", 1),
+                new("Systems.Engine[2].N1", "TURB ENG N1:2", "Percent", SimDataType.Float64, false, "Engine", 2),
+
+                // ===== Fuel =====
+                new("Systems.Fuel.TotalQuantity", "FUEL TOTAL QUANTITY", "Gallons", SimDataType.Float64, false, "Fuel"),
+                new("Systems.Fuel.Pump[1]", "FUEL PUMP SWITCH:1", "Bool", SimDataType.Bool, true, "Fuel", 1),
+                new("Systems.Fuel.Pump[2]", "FUEL PUMP SWITCH:2", "Bool", SimDataType.Bool, true, "Fuel", 2),
+                new("Systems.Fuel.Selector", "FUEL TANK SELECTOR", "Enum", SimDataType.Int32, true, "Fuel"),
+
+                // ===== Electric =====
+                new("Systems.Electrical.MasterBattery", "ELECTRICAL MASTER BATTERY", "Bool", SimDataType.Bool, true, "Electrical"),
+                new("Systems.Electrical.Avionics", "AVIONICS MASTER SWITCH", "Bool", SimDataType.Bool, true, "Electrical"),
+                new("Systems.Electrical.BusVoltage", "ELECTRICAL MAIN BUS VOLTAGE", "Volts", SimDataType.Float64, false, "Electrical"),
+
+                // ===== Lights =====
+                new("Systems.Lights.Beacon", "LIGHT BEACON", "Bool", SimDataType.Bool, true, "Lights"),
+                new("Systems.Lights.Nav", "LIGHT NAV", "Bool", SimDataType.Bool, true, "Lights"),
+                new("Systems.Lights.Strobe", "LIGHT STROBE", "Bool", SimDataType.Bool, true, "Lights"),
+                new("Systems.Lights.Taxi", "LIGHT TAXI", "Bool", SimDataType.Bool, true, "Lights"),
+                new("Systems.Lights.Landing", "LIGHT LANDING", "Bool", SimDataType.Bool, true, "Lights"),
+
+                // ===== Autopilot =====
+                new("Systems.Autopilot.AP_MASTER", "AUTOPILOT MASTER", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_MASTER"),
+                new("Systems.Autopilot.FD", "AUTOPILOT FLIGHT DIRECTOR ACTIVE", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "FLIGHT_DIRECTOR_TOGGLE"),
+                new("Systems.Autopilot.HDG_HOLD", "AUTOPILOT HEADING LOCK", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_HDG_HOLD"),
+                new("Systems.Autopilot.NAV", "AUTOPILOT NAV1 LOCK", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_NAV1_HOLD"),
+                new("Systems.Autopilot.APP", "AUTOPILOT APPROACH HOLD", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_APR_HOLD"),
+                new("Systems.Autopilot.ALT_HOLD", "AUTOPILOT ALTITUDE LOCK", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_ALT_HOLD"),
+                new("Systems.Autopilot.VS_HOLD", "AUTOPILOT VERTICAL HOLD", "Bool", SimDataType.Bool, true, "Autopilot", EventWrite: "AP_VS_HOLD"),
+                new("Systems.Autopilot.HDG", "AUTOPILOT HEADING LOCK DIR", "Degrees", SimDataType.Float64, true, "Autopilot", EventWrite: "HEADING_BUG_SET"),
+                new("Systems.Autopilot.ALT", "AUTOPILOT ALTITUDE LOCK VAR", "Feet", SimDataType.Float64, true, "Autopilot", EventWrite: "AP_ALT_VAR_SET_ENGLISH"),
+                new("Systems.Autopilot.VS", "AUTOPILOT VERTICAL HOLD VAR", "Feet per minute", SimDataType.Float64, true, "Autopilot", EventWrite: "AP_VS_VAR_SET_ENGLISH"),
+
+                // ===== Radios =====
+                new("Systems.Radios.Com1Active", "COM ACTIVE FREQUENCY:1", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Com1Standby", "COM STANDBY FREQUENCY:1", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Com2Active", "COM ACTIVE FREQUENCY:2", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Com2Standby", "COM STANDBY FREQUENCY:2", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Nav1Active", "NAV ACTIVE FREQUENCY:1", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Nav1Standby", "NAV STANDBY FREQUENCY:1", "MHz", SimDataType.Float64, true, "Radios"),
+                new("Systems.Radios.Transponder", "TRANSPONDER CODE", "Number", SimDataType.Int32, true, "Radios"),
+
+                // ===== Anti-Ice =====
+                new("Systems.AntiIce.Pitot", "PITOT HEAT", "Bool", SimDataType.Bool, true, "AntiIce"),
+                new("Systems.AntiIce.Structural", "STRUCTURAL DEICE SWITCH", "Bool", SimDataType.Bool, true, "AntiIce"),
+                new("Systems.AntiIce.Engine[1]", "ENG ANTI ICE:1", "Bool", SimDataType.Bool, true, "AntiIce", 1),
+                new("Systems.AntiIce.Engine[2]", "ENG ANTI ICE:2", "Bool", SimDataType.Bool, true, "AntiIce", 2),
+
+                // ===== Doors & Cabina =====
+                new("Systems.Doors.Cabin", "EXIT OPEN:0", "Percent", SimDataType.Float64, true, "Doors"),
+                new("Systems.Doors.Cargo", "EXIT OPEN:1", "Percent", SimDataType.Float64, true, "Doors"),
+                new("Cabin.Seatbelt", "SEAT BELT SWITCH", "Bool", SimDataType.Bool, true, "Cabin"),
+                new("Cabin.NoSmoking", "NO SMOKING SWITCH", "Bool", SimDataType.Bool, true, "Cabin"),
+
+                // ===== Gear =====
+                new("Systems.Gear.Nose", "GEAR CENTER POSITION", "Percent", SimDataType.Float64, false, "Gear"),
+                new("Systems.Gear.Left", "GEAR LEFT POSITION", "Percent", SimDataType.Float64, false, "Gear"),
+                new("Systems.Gear.Right", "GEAR RIGHT POSITION", "Percent", SimDataType.Float64, false, "Gear"),
+
+                // ===== Spoilers/Slats =====
+                new("Systems.Spoilers.Position", "SPOILERS POSITION", "Percent", SimDataType.Float64, false, "Spoilers"),
+                new("Systems.Spoilers.Armed", "SPOILERS ARMED", "Bool", SimDataType.Bool, true, "Spoilers"),
+
+                // ===== Pressurización =====
+                new("Systems.Pressurization.CabinAltitude", "PRESSURIZATION CABIN ALTITUDE", "Feet", SimDataType.Float64, false, "Pressurization"),
+                new("Systems.Pressurization.DiffPressure", "PRESSURIZATION DIFFERENTIAL PRESSURE", "Psi", SimDataType.Float64, false, "Pressurization"),
+
+                // ===== APU =====
+                new("Systems.APU.Available", "APU GENERATOR SWITCH", "Bool", SimDataType.Bool, true, "APU", EventWrite: "APU_GENERATOR_SWITCH"),
+                new("Systems.APU.RPM", "APU PCT RPM", "Percent", SimDataType.Float64, false, "APU"),
+
+                // ===== Environment =====
+                new("Environment.OutsideAirTemp", "AMBIENT TEMPERATURE", "Celsius", SimDataType.Float64, false, "Environment"),
+                new("Environment.TotalAirTemp", "TOTAL AIR TEMPERATURE", "Celsius", SimDataType.Float64, false, "Environment"),
+                new("Environment.Icing", "STRUCTURAL ICE PCT", "Percent", SimDataType.Float64, false, "Environment"),
             };
+
+            return vars;
         }
 
-        public override string ToString()
+        private static IEnumerable<SimEventDescriptor> BuildEvents()
         {
-            return $"{Name} = {Value} {Units}";
-        }
-
-        // Diccionario auxiliar si en algún punto el sistema necesita agrupar múltiples SimVars
-        public static Dictionary<string, SimDataDefinition> FromList(IEnumerable<SimDataDefinition> list)
-        {
-            var dict = new Dictionary<string, SimDataDefinition>(StringComparer.OrdinalIgnoreCase);
-            foreach (var def in list)
-            {
-                if (!dict.ContainsKey(def.Name))
-                    dict.Add(def.Name, def);
-            }
-            return dict;
+            yield return new SimEventDescriptor("Systems.Autopilot.AP_MASTER", "K:AP_MASTER", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.FD", "K:FLIGHT_DIRECTOR_TOGGLE", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.HDG_HOLD", "K:AP_HDG_HOLD", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.NAV", "K:AP_NAV1_HOLD", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.APP", "K:AP_APR_HOLD", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.ALT_HOLD", "K:AP_ALT_HOLD", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.VS_HOLD", "K:AP_VS_HOLD", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.HDG", "K:HEADING_BUG_SET", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.ALT", "K:AP_ALT_VAR_SET_ENGLISH", "Autopilot");
+            yield return new SimEventDescriptor("Systems.Autopilot.VS", "K:AP_VS_VAR_SET_ENGLISH", "Autopilot");
+            yield return new SimEventDescriptor("Controls.Flaps.StepUp", "K:FLAPS_DECR", "FlightControls");
+            yield return new SimEventDescriptor("Controls.Flaps.StepDown", "K:FLAPS_INCR", "FlightControls");
+            yield return new SimEventDescriptor("Controls.Spoilers.Arm", "K:SPOILERS_ARM_SET", "FlightControls");
+            yield return new SimEventDescriptor("Controls.Gear.Up", "K:GEAR_UP", "Gear");
+            yield return new SimEventDescriptor("Controls.Gear.Down", "K:GEAR_DOWN", "Gear");
+            yield return new SimEventDescriptor("Systems.Lights.Beacon", "K:TOGGLE_BEACON_LIGHTS", "Lights");
+            yield return new SimEventDescriptor("Systems.Lights.Nav", "K:TOGGLE_NAV_LIGHTS", "Lights");
+            yield return new SimEventDescriptor("Systems.Lights.Strobe", "K:STROBES_TOGGLE", "Lights");
+            yield return new SimEventDescriptor("Systems.Lights.Taxi", "K:TOGGLE_TAXI_LIGHTS", "Lights");
+            yield return new SimEventDescriptor("Systems.Lights.Landing", "K:LANDING_LIGHTS_TOGGLE", "Lights");
+            yield return new SimEventDescriptor("Systems.Radios.Com1Swap", "K:COM_STBY_RADIO_SWAP", "Radios");
+            yield return new SimEventDescriptor("Systems.Radios.Com2Swap", "K:COM2_RADIO_SWAP", "Radios");
+            yield return new SimEventDescriptor("Systems.Radios.Nav1Swap", "K:NAV1_RADIO_SWAP", "Radios");
+            yield return new SimEventDescriptor("Cabin.Seatbelt", "K:SEATBELTS_SIGN_TOGGLE", "Cabin");
+            yield return new SimEventDescriptor("Cabin.NoSmoking", "K:NO_SMOKING_SIGN_TOGGLE", "Cabin");
+            yield return new SimEventDescriptor("Systems.AntiIce.Pitot", "K:PITOT_HEAT_TOGGLE", "AntiIce");
+            yield return new SimEventDescriptor("Systems.AntiIce.Structural", "K:ANTI_ICE_TOGGLE", "AntiIce");
+            yield return new SimEventDescriptor("Systems.Fuel.Selector", "K:FUEL_SELECTOR_ALL", "Fuel");
         }
     }
 }

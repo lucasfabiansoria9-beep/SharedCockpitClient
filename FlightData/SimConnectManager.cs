@@ -1,186 +1,112 @@
 using System;
-using System.Collections.Generic;
-using Microsoft.FlightSimulator.SimConnect;
+using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SharedCockpitClient.FlightData
 {
     /// <summary>
-    /// Administra la conexión SimConnect o modo simulado (Lab Mode).
-    /// Actualiza el estado del avión y propaga snapshots hacia AircraftStateManager.
+    /// Orquesta la interacción con SimConnect o su mock, generando snapshots y aplicando comandos remotos.
     /// </summary>
     public sealed class SimConnectManager : IDisposable
     {
-        private SimConnect? simconnect;
-        private bool isMock;
+        private readonly AircraftStateManager _aircraftState;
+        private readonly object _snapshotLock = new();
+        private SimStateSnapshot _lastSnapshot = new();
+        private readonly SimDataCollector _collector;
+        private readonly SimCommandApplier _commandApplier;
+        private readonly SimDataMock _mockData;
+        private bool _started;
 
-        private string userRole = "PILOT"; // ✅ Requerido por LegacyWebSocketManager
-        private readonly AircraftStateManager aircraftState;
-        private readonly object stateLock = new();
-        public event Action<SimStateSnapshot>? OnSnapshot;
+        public event Action<SimStateSnapshot, bool>? OnSnapshot;
 
-        private readonly Dictionary<string, object?> liveData = new(StringComparer.OrdinalIgnoreCase);
-
-        public SimConnectManager(AircraftStateManager stateManager)
+        public SimConnectManager(AircraftStateManager aircraftState)
         {
-            aircraftState = stateManager ?? throw new ArgumentNullException(nameof(stateManager));
-            isMock = GlobalFlags.IsLabMode; // 🧪 Detecta modo laboratorio automáticamente
-        }
+            _aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
 
-        /// <summary>
-        /// Inicializa la conexión SimConnect real, o simula si está en modo laboratorio.
-        /// </summary>
-        public void Initialize(IntPtr handle)
-        {
-            if (isMock)
+            if (GlobalFlags.IsLabMode)
             {
-                Console.WriteLine("[SimConnect] ⚙️ Modo laboratorio activo. Conexión real omitida.");
-                return;
+                Console.WriteLine("[SimConnect] 🧪 Inicializando en modo laboratorio (mock).");
+            }
+            else
+            {
+                Console.WriteLine("[SimConnect] ⚠️ Conexión real aún no disponible en este entorno. Usando mock.");
             }
 
-            try
-            {
-                simconnect = new SimConnect("SharedCockpitClient", handle, 0, null, 0);
-                Console.WriteLine("[SimConnect] Conexión establecida correctamente.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[SimConnect] ❌ Error al inicializar: {ex.Message}");
-            }
+            _mockData = new SimDataMock();
+            _collector = new SimDataCollector(_mockData.SnapshotAsync);
+            _collector.OnSnapshot += HandleSnapshot;
+
+            _commandApplier = new SimCommandApplier(
+                async (descriptor, value, ct) =>
+                {
+                    await _mockData.ApplyVarAsync(descriptor, value, ct).ConfigureAwait(false);
+                    MirrorState(descriptor.Path, value);
+                    return true;
+                },
+                async (descriptor, value, ct) =>
+                {
+                    await _mockData.TriggerEventAsync(descriptor, value, ct).ConfigureAwait(false);
+                    MirrorState(descriptor.Path, value);
+                    return true;
+                },
+                MirrorState);
         }
 
-        /// <summary>
-        /// Permite activar el modo simulado manualmente (sin SimConnect real).
-        /// </summary>
-        public void EnableMockMode()
+        public void Start()
         {
-            isMock = true;
-            Console.WriteLine("[SimConnect] 🧪 Modo laboratorio forzado manualmente.");
+            if (_started) return;
+            _started = true;
+            _collector.Start();
         }
 
-        /// <summary>
-        /// Configura el rol del usuario local (PILOT / COPILOT) para logging y control.
-        /// </summary>
-        public void SetUserRole(string role)
+        public Task StopAsync() => _collector.StopAsync();
+
+        public Task<bool> ApplyRemoteChangeAsync(string path, object? value, CancellationToken ct)
         {
-            userRole = role.ToUpperInvariant();
-            Console.WriteLine($"[SimConnect] Rol configurado: {userRole}");
+            return _commandApplier.ApplyAsync(path, value, ct);
         }
 
-        /// <summary>
-        /// Inyecta un snapshot simulado en el estado global del avión.
-        /// </summary>
-        public void InjectSnapshot(SimStateSnapshot snapshot)
+        public SimStateSnapshot GetLastSnapshot()
         {
-            lock (stateLock)
+            lock (_snapshotLock)
             {
-                var dict = ConvertSnapshotToDictionary(snapshot);
-                aircraftState.ApplySnapshot(dict);
-            }
-
-            OnSnapshot?.Invoke(snapshot);
-        }
-
-        /// <summary>
-        /// Actualiza el estado del avión leyendo variables simuladas o de SimConnect.
-        /// </summary>
-        public void UpdateStateFromSim()
-        {
-            var controls = new ControlsStruct
-            {
-                Throttle = TryGetDouble(liveData, "throttle"),
-                Flaps = TryGetDouble(liveData, "flaps"),
-                GearDown = TryGetBool(liveData, "gearDown"),
-                ParkingBrake = TryGetBool(liveData, "parkingBrake")
-            };
-
-            var systems = new SystemsStruct
-            {
-                LightsOn = TryGetBool(liveData, "lightsOn"),
-                DoorOpen = TryGetBool(liveData, "doorOpen"),
-                AvionicsOn = TryGetBool(liveData, "avionicsOn"),
-                EngineOn = TryGetBool(liveData, "engineOn")
-            };
-
-            var snapshot = new SimStateSnapshot
-            {
-                Controls = controls,
-                Systems = systems
-            };
-
-            lock (stateLock)
-            {
-                var dict = ConvertSnapshotToDictionary(snapshot);
-                aircraftState.ApplySnapshot(dict);
-            }
-
-            OnSnapshot?.Invoke(snapshot);
-        }
-
-        /// <summary>
-        /// Convierte un snapshot estructurado a un diccionario compatible con AircraftStateManager.
-        /// </summary>
-        private static Dictionary<string, object?> ConvertSnapshotToDictionary(SimStateSnapshot s)
-        {
-            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
-            {
-                { "Throttle", s.Controls.Throttle },
-                { "Flaps", s.Controls.Flaps },
-                { "GearDown", s.Controls.GearDown },
-                { "ParkingBrake", s.Controls.ParkingBrake },
-                { "Lights", s.Systems.LightsOn },
-                { "DoorOpen", s.Systems.DoorOpen },
-                { "AvionicsOn", s.Systems.AvionicsOn },
-                { "EngineOn", s.Systems.EngineOn }
-            };
-        }
-
-        /// <summary>
-        /// Procesa mensajes entrantes desde SimConnect.
-        /// </summary>
-        public void ReceiveMessage()
-        {
-            if (isMock || simconnect == null)
-                return;
-
-            try
-            {
-                simconnect.ReceiveMessage();
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[SimConnect] ⚠️ Error recibiendo mensaje: {ex.Message}");
+                return _lastSnapshot.Clone();
             }
         }
 
-        // === Helpers ===
-        private static double TryGetDouble(Dictionary<string, object?> src, string key, double fallback = 0)
+        private void HandleSnapshot(SimStateSnapshot snapshot, bool isDiff)
         {
-            if (src.TryGetValue(key, out var v) && v is not null)
+            lock (_snapshotLock)
             {
-                if (v is double d) return d;
-                if (v is float f) return f;
-                if (v is int i) return i;
-                if (double.TryParse(v.ToString(), out var p)) return p;
+                if (_lastSnapshot.Values.Count == 0 || !snapshot.IsDiff)
+                {
+                    _lastSnapshot = snapshot.Clone();
+                }
+                else
+                {
+                    _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
+                }
             }
-            return fallback;
+
+            var flat = snapshot.ToFlatDictionary();
+            _aircraftState.ApplySnapshot(flat);
+            OnSnapshot?.Invoke(snapshot, isDiff);
         }
 
-        private static bool TryGetBool(Dictionary<string, object?> src, string key, bool fallback = false)
+        private void MirrorState(string path, object? value)
         {
-            if (src.TryGetValue(key, out var v) && v is not null)
+            lock (_snapshotLock)
             {
-                if (v is bool b) return b;
-                if (v is int i) return i != 0;
-                if (bool.TryParse(v.ToString(), out var p)) return p;
-                if (double.TryParse(v.ToString(), out var d)) return Math.Abs(d) > 0.5;
+                _lastSnapshot.Set(path, value);
             }
-            return fallback;
+
+            _aircraftState.Set(path, value);
         }
 
         public void Dispose()
         {
-            simconnect?.Dispose();
-            simconnect = null;
+            _collector.Dispose();
         }
     }
 }

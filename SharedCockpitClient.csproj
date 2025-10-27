@@ -21,7 +21,6 @@
     <StartupObject>SharedCockpitClient.Program</StartupObject>
 
     <!-- 🔒 Perfil laboratorio: silencia archivos no usados en Fase 1 -->
-    <DefineConstants>$(DefineConstants);LAB_MINIMAL</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -43,6 +42,12 @@
     <Content Include="libs\native\win-x64\**\*.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </Content>
+    <Content Include="Panel\**\*.*">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+    <Content Include="scripts\**\*.ps1">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
