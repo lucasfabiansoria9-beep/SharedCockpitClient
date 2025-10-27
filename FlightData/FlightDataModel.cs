@@ -74,5 +74,44 @@ namespace SharedCockpitClient.FlightData
                 Environment = Environment
             };
         }
+
+        public bool HasMeaningfulDifference(SimStateSnapshot other, double tolerance = 0.01)
+        {
+            static bool Different(double a, double b, double tol) => Math.Abs(a - b) > tol;
+
+            var ctrl = Controls;
+            var otherCtrl = other.Controls;
+            if (Different(ctrl.Throttle, otherCtrl.Throttle, tolerance)) return true;
+            if (Different(ctrl.Flaps, otherCtrl.Flaps, tolerance)) return true;
+            if (Different(ctrl.Elevator, otherCtrl.Elevator, tolerance)) return true;
+            if (Different(ctrl.Aileron, otherCtrl.Aileron, tolerance)) return true;
+            if (Different(ctrl.Rudder, otherCtrl.Rudder, tolerance)) return true;
+            if (Different(ctrl.Spoilers, otherCtrl.Spoilers, tolerance)) return true;
+            if (ctrl.GearDown != otherCtrl.GearDown) return true;
+            if (ctrl.ParkingBrake != otherCtrl.ParkingBrake) return true;
+
+            var systems = Systems;
+            var otherSystems = other.Systems;
+            if (systems.LightsOn != otherSystems.LightsOn) return true;
+            if (systems.DoorOpen != otherSystems.DoorOpen) return true;
+            if (systems.AvionicsOn != otherSystems.AvionicsOn) return true;
+
+            var cabin = Cabin;
+            var otherCabin = other.Cabin;
+            if (cabin.LandingGearDown != otherCabin.LandingGearDown) return true;
+            if (Different(cabin.SpoilersDeployed, otherCabin.SpoilersDeployed, tolerance)) return true;
+            if (cabin.AutopilotOn != otherCabin.AutopilotOn) return true;
+            if (Different(cabin.AutopilotAltitude, otherCabin.AutopilotAltitude, tolerance)) return true;
+            if (Different(cabin.AutopilotHeading, otherCabin.AutopilotHeading, tolerance)) return true;
+
+            var env = Environment;
+            var otherEnv = other.Environment;
+            if (Different(env.AmbientTemperature, otherEnv.AmbientTemperature, tolerance)) return true;
+            if (Different(env.BarometricPressure, otherEnv.BarometricPressure, tolerance)) return true;
+            if (Different(env.WindVelocity, otherEnv.WindVelocity, tolerance)) return true;
+            if (Different(env.WindDirection, otherEnv.WindDirection, tolerance)) return true;
+
+            return false;
+        }
     }
 }
