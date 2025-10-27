@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using SharedCockpitClient.Tools;
 
 namespace SharedCockpitClient.FlightData
 {
@@ -38,12 +39,16 @@ namespace SharedCockpitClient.FlightData
         private static readonly Lazy<IReadOnlyDictionary<string, SimVarDescriptor>> _varsByPath
             = new(() => _allVars.Value.ToDictionary(v => v.Path, v => v, StringComparer.OrdinalIgnoreCase));
 
+        private static readonly Lazy<IReadOnlyList<SimEventDescriptor>> _allEvents = new(() => BuildEvents());
+
         private static readonly Lazy<IReadOnlyDictionary<string, SimEventDescriptor>> _eventsByPath
-            = new(() => BuildEvents().ToDictionary(e => e.Path, e => e, StringComparer.OrdinalIgnoreCase));
+            = new(() => _allEvents.Value.ToDictionary(e => e.Path, e => e, StringComparer.OrdinalIgnoreCase));
 
         public static IReadOnlyList<SimVarDescriptor> AllSimVars => _allVars.Value;
 
         public static IReadOnlyDictionary<string, SimVarDescriptor> VarsByPath => _varsByPath.Value;
+
+        public static IReadOnlyList<SimEventDescriptor> AllSimEvents => _allEvents.Value;
 
         public static IReadOnlyDictionary<string, SimEventDescriptor> EventsByPath => _eventsByPath.Value;
 
@@ -163,39 +168,66 @@ namespace SharedCockpitClient.FlightData
                 new("Environment.Icing", "STRUCTURAL ICE PCT", "Percent", SimDataType.Float64, false, "Environment"),
             };
 
+            if (SimVarCatalogGenerator.TryGetCatalog(out var catalog))
+            {
+                foreach (var descriptor in catalog.SimVars)
+                {
+                    if (!vars.Any(existing => existing.Path.Equals(descriptor.Path, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        vars.Add(descriptor);
+                    }
+                }
+            }
+
             return vars;
         }
 
-        private static IEnumerable<SimEventDescriptor> BuildEvents()
+        private static IReadOnlyList<SimEventDescriptor> BuildEvents()
         {
-            yield return new SimEventDescriptor("Systems.Autopilot.AP_MASTER", "K:AP_MASTER", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.FD", "K:FLIGHT_DIRECTOR_TOGGLE", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.HDG_HOLD", "K:AP_HDG_HOLD", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.NAV", "K:AP_NAV1_HOLD", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.APP", "K:AP_APR_HOLD", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.ALT_HOLD", "K:AP_ALT_HOLD", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.VS_HOLD", "K:AP_VS_HOLD", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.HDG", "K:HEADING_BUG_SET", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.ALT", "K:AP_ALT_VAR_SET_ENGLISH", "Autopilot");
-            yield return new SimEventDescriptor("Systems.Autopilot.VS", "K:AP_VS_VAR_SET_ENGLISH", "Autopilot");
-            yield return new SimEventDescriptor("Controls.Flaps.StepUp", "K:FLAPS_DECR", "FlightControls");
-            yield return new SimEventDescriptor("Controls.Flaps.StepDown", "K:FLAPS_INCR", "FlightControls");
-            yield return new SimEventDescriptor("Controls.Spoilers.Arm", "K:SPOILERS_ARM_SET", "FlightControls");
-            yield return new SimEventDescriptor("Controls.Gear.Up", "K:GEAR_UP", "Gear");
-            yield return new SimEventDescriptor("Controls.Gear.Down", "K:GEAR_DOWN", "Gear");
-            yield return new SimEventDescriptor("Systems.Lights.Beacon", "K:TOGGLE_BEACON_LIGHTS", "Lights");
-            yield return new SimEventDescriptor("Systems.Lights.Nav", "K:TOGGLE_NAV_LIGHTS", "Lights");
-            yield return new SimEventDescriptor("Systems.Lights.Strobe", "K:STROBES_TOGGLE", "Lights");
-            yield return new SimEventDescriptor("Systems.Lights.Taxi", "K:TOGGLE_TAXI_LIGHTS", "Lights");
-            yield return new SimEventDescriptor("Systems.Lights.Landing", "K:LANDING_LIGHTS_TOGGLE", "Lights");
-            yield return new SimEventDescriptor("Systems.Radios.Com1Swap", "K:COM_STBY_RADIO_SWAP", "Radios");
-            yield return new SimEventDescriptor("Systems.Radios.Com2Swap", "K:COM2_RADIO_SWAP", "Radios");
-            yield return new SimEventDescriptor("Systems.Radios.Nav1Swap", "K:NAV1_RADIO_SWAP", "Radios");
-            yield return new SimEventDescriptor("Cabin.Seatbelt", "K:SEATBELTS_SIGN_TOGGLE", "Cabin");
-            yield return new SimEventDescriptor("Cabin.NoSmoking", "K:NO_SMOKING_SIGN_TOGGLE", "Cabin");
-            yield return new SimEventDescriptor("Systems.AntiIce.Pitot", "K:PITOT_HEAT_TOGGLE", "AntiIce");
-            yield return new SimEventDescriptor("Systems.AntiIce.Structural", "K:ANTI_ICE_TOGGLE", "AntiIce");
-            yield return new SimEventDescriptor("Systems.Fuel.Selector", "K:FUEL_SELECTOR_ALL", "Fuel");
+            var events = new List<SimEventDescriptor>
+            {
+                new("Systems.Autopilot.AP_MASTER", "K:AP_MASTER", "Autopilot"),
+                new("Systems.Autopilot.FD", "K:FLIGHT_DIRECTOR_TOGGLE", "Autopilot"),
+                new("Systems.Autopilot.HDG_HOLD", "K:AP_HDG_HOLD", "Autopilot"),
+                new("Systems.Autopilot.NAV", "K:AP_NAV1_HOLD", "Autopilot"),
+                new("Systems.Autopilot.APP", "K:AP_APR_HOLD", "Autopilot"),
+                new("Systems.Autopilot.ALT_HOLD", "K:AP_ALT_HOLD", "Autopilot"),
+                new("Systems.Autopilot.VS_HOLD", "K:AP_VS_HOLD", "Autopilot"),
+                new("Systems.Autopilot.HDG", "K:HEADING_BUG_SET", "Autopilot"),
+                new("Systems.Autopilot.ALT", "K:AP_ALT_VAR_SET_ENGLISH", "Autopilot"),
+                new("Systems.Autopilot.VS", "K:AP_VS_VAR_SET_ENGLISH", "Autopilot"),
+                new("Controls.Flaps.StepUp", "K:FLAPS_DECR", "FlightControls"),
+                new("Controls.Flaps.StepDown", "K:FLAPS_INCR", "FlightControls"),
+                new("Controls.Spoilers.Arm", "K:SPOILERS_ARM_SET", "FlightControls"),
+                new("Controls.Gear.Up", "K:GEAR_UP", "Gear"),
+                new("Controls.Gear.Down", "K:GEAR_DOWN", "Gear"),
+                new("Systems.Lights.Beacon", "K:TOGGLE_BEACON_LIGHTS", "Lights"),
+                new("Systems.Lights.Nav", "K:TOGGLE_NAV_LIGHTS", "Lights"),
+                new("Systems.Lights.Strobe", "K:STROBES_TOGGLE", "Lights"),
+                new("Systems.Lights.Taxi", "K:TOGGLE_TAXI_LIGHTS", "Lights"),
+                new("Systems.Lights.Landing", "K:LANDING_LIGHTS_TOGGLE", "Lights"),
+                new("Systems.Radios.Com1Swap", "K:COM_STBY_RADIO_SWAP", "Radios"),
+                new("Systems.Radios.Com2Swap", "K:COM2_RADIO_SWAP", "Radios"),
+                new("Systems.Radios.Nav1Swap", "K:NAV1_RADIO_SWAP", "Radios"),
+                new("Cabin.Seatbelt", "K:SEATBELTS_SIGN_TOGGLE", "Cabin"),
+                new("Cabin.NoSmoking", "K:NO_SMOKING_SIGN_TOGGLE", "Cabin"),
+                new("Systems.AntiIce.Pitot", "K:PITOT_HEAT_TOGGLE", "AntiIce"),
+                new("Systems.AntiIce.Structural", "K:ANTI_ICE_TOGGLE", "AntiIce"),
+                new("Systems.Fuel.Selector", "K:FUEL_SELECTOR_ALL", "Fuel")
+            };
+
+            if (SimVarCatalogGenerator.TryGetCatalog(out var catalog))
+            {
+                foreach (var descriptor in catalog.SimEvents)
+                {
+                    if (!events.Any(existing => existing.Path.Equals(descriptor.Path, StringComparison.OrdinalIgnoreCase)))
+                    {
+                        events.Add(descriptor);
+                    }
+                }
+            }
+
+            return events;
         }
     }
 }
