@@ -3,73 +3,38 @@ using System;
 namespace SharedCockpitClient
 {
     /// <summary>
-    /// Flags globales y control de activación del modo laboratorio.
-    /// El PIN se obtiene de la variable de entorno "SCC_LAB_PIN" para evitar dejar secretos en el código.
+    /// Banderas y configuración global de ejecución.
     /// </summary>
     public static class GlobalFlags
     {
-        public static bool IsLabMode { get; private set; }
+        /// <summary>
+        /// Indica si el modo laboratorio está activo.
+        /// </summary>
+        public static bool IsLabMode { get; private set; } = InitializeLabMode();
 
         /// <summary>
-        /// Intenta activar modo laboratorio comparando el PIN provisto con la variable de entorno.
-        /// Si la variable de entorno no está definida, por compatibilidad se acepta el PIN por defecto (9091).
-        /// Recomendado: definir SCC_LAB_PIN en la máquina de desarrollo para mayor seguridad.
+        /// Fuerza el modo laboratorio desde código (por ejemplo con --lab).
+        /// No imprime ni revela secretos.
         /// </summary>
-        public static bool TryEnableLabMode(string pin)
-        {
-            var secret = GetSecretPin();
-            if (secret != null)
-            {
-                if (string.Equals(pin, secret, StringComparison.Ordinal))
-                {
-                    EnableLabMode();
-                    return true;
-                }
-                return false;
-            }
+        public static void ForceLabMode() => IsLabMode = true;
 
-            // Fallback: por compatibilidad aceptamos 9091 solo si no hay variable de entorno.
-            if (pin == "9091")
-            {
-                EnableLabMode();
-                return true;
-            }
-
-            return false;
-        }
-
-        public static void EnableLabMode()
-        {
-            IsLabMode = true;
-            ShowActivationMessage();
-        }
-
-        private static string? GetSecretPin()
+        /// <summary>
+        /// Inicializa el modo laboratorio desde el entorno (variable SCC_LAB_PIN u otro mecanismo).
+        /// No se imprime el valor ni se expone información sensible.
+        /// </summary>
+        private static bool InitializeLabMode()
         {
             try
             {
-                // Buscar variable de entorno (no sensible al control de versiones)
-                var env = Environment.GetEnvironmentVariable("SCC_LAB_PIN");
-                if (!string.IsNullOrWhiteSpace(env))
-                    return env.Trim();
+                // Si existe una variable de entorno que habilita el modo lab, activamos.
+                // (No revelamos ni validamos el valor aquí por seguridad)
+                var pin = Environment.GetEnvironmentVariable("SCC_LAB_PIN");
+                return !string.IsNullOrWhiteSpace(pin);
             }
-            catch { }
-            return null;
+            catch
+            {
+                return false;
+            }
         }
-
-        private static void ShowActivationMessage()
-        {
-            var prev = Console.ForegroundColor;
-            Console.ForegroundColor = ConsoleColor.Yellow;
-            Console.WriteLine();
-            Console.WriteLine("🧪==============================================🧪");
-            Console.WriteLine("   LAB MODE ACTIVADO — ENTORNO DE DESARROLLO");
-            Console.WriteLine("   (Sin conexión real a MSFS - solo para pruebas)");
-            Console.WriteLine("🧪==============================================🧪");
-            Console.ForegroundColor = prev;
-        }
-
-        public static string GetCurrentModeLabel()
-            => IsLabMode ? "🧪 Modo Laboratorio" : "✈️ Modo Real (SimConnect)";
     }
 }

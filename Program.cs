@@ -22,7 +22,7 @@ namespace SharedCockpitClient
 
             if (labMode)
             {
-                GlobalFlags.IsLabMode = true;
+                GlobalFlags.ForceLabMode();
                 Console.WriteLine("[Boot] 🧪 Modo laboratorio activado por argumento (--lab).");
             }
 
