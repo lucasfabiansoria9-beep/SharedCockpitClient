@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Globalization;
 using System.Net;
@@ -28,8 +29,15 @@ namespace SharedCockpitClient.Network
         private System.Threading.Timer? syncTimer;
 
         private readonly object snapshotLock = new();
-        private SimStateSnapshot? pendingSnapshot;
-        private bool hasPendingSnapshot;
+        private SimStateSnapshot? latestSnapshot;
+        private SimStateSnapshot? lastSentSnapshot;
+
+        private readonly object connectionLock = new();
+        private bool isPeerConnected;
+        private bool wasEverConnected;
+        private bool syncPauseLogged;
+
+        private readonly TimeSpan continuousSyncInterval = TimeSpan.FromMilliseconds(150);
 
         private readonly string sourceTag = Guid.NewGuid().ToString();
         private readonly JsonSerializerOptions jsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
@@ -191,7 +199,15 @@ namespace SharedCockpitClient.Network
                 Console.WriteLine($"🚀 Cabina '{name}' iniciada en ws://{localIp}:8081 ({(pub ? "pública" : "privada")})");
 
                 hostServer = new WebSocketHost(8081);
-                hostServer.OnClientConnected += id => Logger.Info($"✅ Cliente conectado ({id})");
+                hostServer.OnClientConnected += id =>
+                {
+                    Logger.Info($"✅ Cliente conectado ({id})");
+                    UpdatePeerConnection(true);
+                };
+                hostServer.OnClientDisconnected += id =>
+                {
+                    UpdatePeerConnection(hostServer.HasClients);
+                };
                 hostServer.OnMessage += OnWebSocketMessage;
                 hostServer.Start();
             }
@@ -216,10 +232,22 @@ namespace SharedCockpitClient.Network
             if (isHost) return;
 
             ws = new WebSocketManager(webSocketUrl, sim);
-            ws.OnOpen += () => Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
+            ws.OnOpen += () =>
+            {
+                Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
+                UpdatePeerConnection(true);
+            };
             ws.OnMessage += OnWebSocketMessage;
-            ws.OnError += msg => Logger.Warn($"Error WS: {msg}");
-            ws.OnClose += () => Logger.Warn("Conexión WS cerrada.");
+            ws.OnError += msg =>
+            {
+                Logger.Warn($"Error WS: {msg}");
+                UpdatePeerConnection(false);
+            };
+            ws.OnClose += () =>
+            {
+                Logger.Warn("Conexión WS cerrada.");
+                UpdatePeerConnection(false);
+            };
             ws.Connect();
         }
 
@@ -307,9 +335,7 @@ namespace SharedCockpitClient.Network
         {
             lock (snapshotLock)
             {
-                // Si tu SimStateSnapshot tiene Clone(), perfecto; sino, podemos asignar directo.
-                pendingSnapshot = snap?.Clone() ?? snap;
-                hasPendingSnapshot = pendingSnapshot is not null;
+                latestSnapshot = snap?.Clone() ?? snap;
             }
         }
 
@@ -361,39 +387,100 @@ namespace SharedCockpitClient.Network
         {
             if (syncTimer != null) return;
 
-            syncTimer = new System.Threading.Timer(_ =>
+            syncTimer = new System.Threading.Timer(_ => ContinuousSyncTick(), null, TimeSpan.Zero, continuousSyncInterval);
+        }
+
+        private void ContinuousSyncTick()
+        {
+            try
             {
-                try
+                if (!IsPeerConnected())
                 {
-                    SimStateSnapshot? snapshot;
+                    return;
+                }
+
+                SimStateSnapshot? snapshot;
+                SimStateSnapshot? lastSnapshot;
+                lock (snapshotLock)
+                {
+                    snapshot = latestSnapshot?.Clone() ?? latestSnapshot;
+                    lastSnapshot = lastSentSnapshot;
+                }
+
+                if (snapshot == null)
+                    return;
+
+                var shouldSend = lastSnapshot is null || snapshot.HasMeaningfulDifference(lastSnapshot);
+                if (!shouldSend)
+                    return;
+
+                var flat = FlattenSnapshot(snapshot);
+                if (flat.Count == 0)
+                {
                     lock (snapshotLock)
                     {
-                        if (!hasPendingSnapshot || pendingSnapshot == null) return;
-                        snapshot = pendingSnapshot;
-                        hasPendingSnapshot = false;
-                        pendingSnapshot = null;
+                        lastSentSnapshot = snapshot.Clone();
                     }
-
-                    // 🔁 Enviar snapshot FLAT para que el peer lo entienda
-                    var flat = FlattenSnapshot(snapshot);
-
-                    var json = JsonSerializer.Serialize(new
-                    {
-                        type = "sync-update",
-                        changes = flat
-                    }, jsonOptions);
-
-                    if (isHost) hostServer?.Broadcast(json);
-                    else ws?.Send(json);
+                    return;
                 }
-                catch (Exception ex)
+
+                var json = JsonSerializer.Serialize(new
                 {
-                    Logger.Warn($"Error en loop de sync: {ex.Message}");
+                    type = "sync-update",
+                    changes = flat
+                }, jsonOptions);
+
+                if (isHost)
+                    hostServer?.Broadcast(json);
+                else
+                    ws?.Send(json);
+
+                Logger.Info($"[ContinuousSync] Snapshot enviado ({flat.Count} variables)");
+
+                lock (snapshotLock)
+                {
+                    lastSentSnapshot = snapshot.Clone();
                 }
-            },
-            null,
-            TimeSpan.Zero,
-            TimeSpan.FromMilliseconds(300));
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"Error en loop de sync: {ex.Message}");
+            }
+        }
+
+        private bool IsPeerConnected()
+        {
+            lock (connectionLock)
+            {
+                return isPeerConnected;
+            }
+        }
+
+        private void UpdatePeerConnection(bool connected)
+        {
+            lock (connectionLock)
+            {
+                if (connected)
+                {
+                    isPeerConnected = true;
+                    wasEverConnected = true;
+                    syncPauseLogged = false;
+                    return;
+                }
+
+                if (isPeerConnected || (wasEverConnected && !syncPauseLogged))
+                {
+                    Logger.Warn("[SyncPaused] Conexión perdida. Esperando reconexión...");
+                    syncPauseLogged = true;
+                }
+
+                isPeerConnected = false;
+            }
+
+            lock (snapshotLock)
+            {
+                lastSentSnapshot = null;
+            }
         }
 
         // Pasar el snapshot (con grupos) a un diccionario plano
@@ -478,6 +565,7 @@ namespace SharedCockpitClient.Network
         private void Shutdown()
         {
             syncTimer?.Dispose();
+            UpdatePeerConnection(false);
             try { ws?.Close(); } catch { }
             try { hostServer?.Stop(); } catch { }
             try { sim.Dispose(); } catch { }
