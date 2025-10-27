@@ -17,7 +17,7 @@ namespace SharedCockpitClient.Network
     }
 
     /// <summary>
-    /// Controla sincronización: anti-eco, idempotencia, LWW y delega animaciones.
+    /// Controla sincronización: anti-eco, idempotencia, LWW y delega animaciones y estado.
     /// </summary>
     public sealed class SyncController : IDisposable
     {
@@ -34,12 +34,38 @@ namespace SharedCockpitClient.Network
         private double lastSentFlapsTarget = double.NaN;
         private readonly TimeSpan minSendInterval = TimeSpan.FromMilliseconds(50);
 
+        // 🧩 Integración con el estado global del avión
+        private readonly AircraftStateManager? aircraftState;
+
         public Guid LocalInstanceId => localInstanceId;
 
-        public SyncController(INetworkBus bus)
+        /// <summary>
+        /// Crea un nuevo controlador de sincronización.
+        /// </summary>
+        public SyncController(INetworkBus bus, AircraftStateManager? stateManager = null)
         {
             this.bus = bus ?? throw new ArgumentNullException(nameof(bus));
             this.bus.OnMessage += HandleIncomingJson;
+            this.aircraftState = stateManager;
+
+            // Si existe un manager de estado, suscribirse a sus cambios locales.
+            if (aircraftState != null)
+            {
+                aircraftState.OnPropertyChanged += async (prop, value) =>
+                {
+                    try
+                    {
+                        var jsonVal = JsonSerializer.SerializeToElement(value);
+                        var msg = NewMessage(prop, jsonVal);
+                        Console.WriteLine($"[Send] {prop} = {value} (seq={msg.sequence}, origin={msg.originId})");
+                        await SendAsync(msg).ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Sync] Error enviando {prop}: {ex.Message}");
+                    }
+                };
+            }
         }
 
         public void Dispose()
@@ -47,6 +73,8 @@ namespace SharedCockpitClient.Network
             bus.OnMessage -= HandleIncomingJson;
             flapsAnimator.Dispose();
         }
+
+        #region ======== Entradas locales ========
 
         public async Task SetFlapsLocalAsync(double target)
         {
@@ -61,6 +89,7 @@ namespace SharedCockpitClient.Network
             }
 
             flapsAnimator.AnimateTo(stepped);
+            aircraftState?.Set("Flaps", stepped);
 
             var msg = NewMessage("Flaps", JsonSerializer.SerializeToElement(stepped));
             Console.WriteLine($"[Send] Flaps = {stepped} (seq={msg.sequence}, origin={msg.originId})");
@@ -72,11 +101,16 @@ namespace SharedCockpitClient.Network
             gearDown = !gearDown;
             Console.WriteLine($"[AnimStart] GearDown -> {gearDown}");
             Console.WriteLine("[AnimEnd] GearDown completado");
+            aircraftState?.Set("GearDown", gearDown);
 
             var msg = NewMessage("GearDown", JsonSerializer.SerializeToElement(gearDown));
             Console.WriteLine($"[Send] GearDown = {gearDown} (seq={msg.sequence}, origin={msg.originId})");
             await SendAsync(msg).ConfigureAwait(false);
         }
+
+        #endregion
+
+        #region ======== Mensajes entrantes ========
 
         private void HandleIncomingJson(string json)
         {
@@ -91,21 +125,17 @@ namespace SharedCockpitClient.Network
                 if (msg == null)
                     return;
 
-                if (Guid.TryParse(msg.originId, out var originGuid))
-                {
-                    if (originGuid == localInstanceId)
-                        return;
-                }
-                else
-                {
+                if (!Guid.TryParse(msg.originId, out var originGuid))
                     return;
-                }
+
+                if (originGuid == localInstanceId)
+                    return; // Anti-eco
 
                 var lastSeen = lastSeqByOrigin.GetOrAdd(msg.originId, -1);
                 if (msg.sequence <= lastSeen)
                     return;
-                lastSeqByOrigin[msg.originId] = msg.sequence;
 
+                lastSeqByOrigin[msg.originId] = msg.sequence;
                 ApplyRemoteState(msg);
             }
             catch (Exception ex)
@@ -116,28 +146,61 @@ namespace SharedCockpitClient.Network
 
         private void ApplyRemoteState(StateChangeMessage msg)
         {
-            switch (msg.prop)
+            try
             {
-                case "Flaps":
-                    if (msg.value.ValueKind == JsonValueKind.Number && msg.value.TryGetDouble(out var target))
-                    {
-                        Console.WriteLine($"[RemoteChange] Flaps = {target} (from {msg.originId}, seq={msg.sequence})");
-                        flapsAnimator.AnimateTo(target);
-                    }
-                    break;
-                case "GearDown":
-                    if (msg.value.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                    {
-                        var newVal = msg.value.GetBoolean();
-                        gearDown = newVal;
-                        Console.WriteLine($"[RemoteChange] GearDown = {gearDown} (from {msg.originId}, seq={msg.sequence})");
-                    }
-                    break;
-                default:
-                    Console.WriteLine($"[RemoteChange] {msg.prop} = {msg.value} (from {msg.originId}, seq={msg.sequence})");
-                    break;
+                switch (msg.prop)
+                {
+                    case "Flaps":
+                        if (msg.value.ValueKind == JsonValueKind.Number && msg.value.TryGetDouble(out var target))
+                        {
+                            Console.WriteLine($"[RemoteChange] Flaps = {target} (from {msg.originId}, seq={msg.sequence})");
+                            flapsAnimator.AnimateTo(target);
+                            aircraftState?.Set("Flaps", target);
+                        }
+                        break;
+
+                    case "GearDown":
+                        if (msg.value.ValueKind is JsonValueKind.True or JsonValueKind.False)
+                        {
+                            var newVal = msg.value.GetBoolean();
+                            gearDown = newVal;
+                            Console.WriteLine($"[RemoteChange] GearDown = {gearDown} (from {msg.originId}, seq={msg.sequence})");
+                            aircraftState?.Set("GearDown", gearDown);
+                        }
+                        break;
+
+                    default:
+                        Console.WriteLine($"[RemoteChange] {msg.prop} = {msg.value} (from {msg.originId}, seq={msg.sequence})");
+                        ApplyGenericRemote(msg);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Sync] Error aplicando estado remoto: {ex.Message}");
             }
         }
+
+        // Aplica estados remotos genéricos (luces, motor, etc.)
+        private void ApplyGenericRemote(StateChangeMessage msg)
+        {
+            if (aircraftState == null) return;
+
+            object? val = msg.value.ValueKind switch
+            {
+                JsonValueKind.Number => msg.value.GetDouble(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.String => msg.value.GetString(),
+                _ => msg.value.ToString()
+            };
+
+            aircraftState.Set(msg.prop, val);
+        }
+
+        #endregion
+
+        #region ======== Utilitarios ========
 
         private StateChangeMessage NewMessage(string prop, JsonElement value)
         {
@@ -157,5 +220,7 @@ namespace SharedCockpitClient.Network
             var json = JsonSerializer.Serialize(msg);
             return bus.SendAsync(json);
         }
+
+        #endregion
     }
 }

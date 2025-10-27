@@ -1,27 +1,27 @@
-Write-Host "✈️  Iniciando simulación de cabina compartida local..." -ForegroundColor Cyan
+# test-sync.ps1
+# 🔧 Inicia dos instancias del cliente en modo laboratorio local.
+# Host y Client se comunican por WebSocket interno (127.0.0.1:8081)
 
-# Ruta del ejecutable publicado
-$exePath = "bin\Release\net8.0-windows\win-x64\publish\SharedCockpitClient.exe"
+Write-Host "🧪 Iniciando prueba de sincronización en modo laboratorio..." -ForegroundColor Cyan
 
-if (-Not (Test-Path $exePath)) {
-    Write-Host "⚠️  No se encontró el ejecutable compilado. Ejecutá ./update.ps1 primero." -ForegroundColor Red
+# Rutas absolutas seguras
+$exePath = Join-Path $PSScriptRoot "SharedCockpitClient.exe"
+
+# Verifica existencia
+if (-not (Test-Path $exePath)) {
+    Write-Host "❌ No se encontró el ejecutable: $exePath" -ForegroundColor Red
+    Write-Host "Ejecutá primero: dotnet publish -c Release -r win-x64"
     exit 1
 }
 
-# Puertos de prueba
-$hostPort = 8080
-$clientPort = 8081
+# Host (piloto principal)
+Start-Process -FilePath $exePath -ArgumentList "--lab", "--role", "host" -WindowStyle Normal
 
-# Instancia Piloto
-Start-Process -FilePath $exePath -ArgumentList "--role host --port $hostPort" -WorkingDirectory (Split-Path $exePath)
-Write-Host "🧑‍✈️  Piloto iniciado en ws://localhost:$hostPort" -ForegroundColor Green
-
+# Espera 2 segundos para que inicie el host
 Start-Sleep -Seconds 2
 
-# Instancia Copiloto
-Start-Process -FilePath $exePath -ArgumentList "--role client --connect ws://localhost:$hostPort --port $clientPort" -WorkingDirectory (Split-Path $exePath)
-Write-Host "👨‍✈️  Copiloto iniciado y conectado al Piloto en ws://localhost:$hostPort" -ForegroundColor Green
+# Cliente (copiloto)
+Start-Process -FilePath $exePath -ArgumentList "--lab", "--role", "client", "--peer", "127.0.0.1:8081" -WindowStyle Normal
 
-Write-Host ""
-Write-Host "🛰️  Ambas instancias están corriendo. Observá los logs en consola o en archivos de salida." -ForegroundColor Cyan
-Write-Host "💡  Si todo está bien, deberías ver sincronización de variables (flaps, luces, AP, etc.) en ambos lados."
+Write-Host "✅ Consolas iniciadas: Host + Client (modo laboratorio activo)" -ForegroundColor Green
+Write-Host "🧭 Usá los comandos: flaps <num>, gear, lights on/off, engine on/off, door open/close, state, exit"

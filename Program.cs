@@ -3,6 +3,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using SharedCockpitClient.Network;
+using SharedCockpitClient.FlightData;
 
 namespace SharedCockpitClient
 {
@@ -48,28 +49,39 @@ namespace SharedCockpitClient
                 cts.Cancel();
             };
 
+            // 🔌 Inicializa la conexión de red
             using var ws = new WebSocketManager(isHost, peerUri);
             await ws.StartAsync(cts.Token).ConfigureAwait(false);
 
-            using var sync = new SyncController(ws);
-            Console.WriteLine($"LocalInstanceId = {sync.LocalInstanceId}");
+            // 🧠 Inicializa el estado del avión
+            var aircraftState = new AircraftStateManager();
 
+            // 🔄 Crea el controlador de sincronización con referencia al estado
+            using var sync = new SyncController(ws, aircraftState);
+            Console.WriteLine($"[Boot] LocalInstanceId = {sync.LocalInstanceId}");
+
+            // 🧪 Loop de laboratorio (modo offline)
             if (GlobalFlags.IsLabMode)
             {
-                RunLabLoop(sync, cts.Token);
+                RunLabLoop(sync, aircraftState, cts.Token);
             }
             else
             {
-                Console.WriteLine("[Boot] ℹ️ Modo estándar aún no implementado para Fase 3. Usando loop de laboratorio.");
-                RunLabLoop(sync, cts.Token);
+                Console.WriteLine("[Boot] ℹ️ Modo estándar aún no implementado para Fase 4. Usando loop de laboratorio.");
+                RunLabLoop(sync, aircraftState, cts.Token);
             }
 
             Console.WriteLine("\n[Boot] 🚪 Aplicación finalizada correctamente.");
         }
 
-        private static void RunLabLoop(SyncController sync, CancellationToken token)
+        /// <summary>
+        /// Loop interactivo de laboratorio.
+        /// Permite probar flaps, tren y otras propiedades manualmente.
+        /// </summary>
+        private static void RunLabLoop(SyncController sync, AircraftStateManager state, CancellationToken token)
         {
-            Console.WriteLine("Lab Mode activo. Comandos: flaps <num>, gear, exit");
+            Console.WriteLine("Lab Mode activo. Comandos: flaps <num>, gear, lights <on/off>, engine <on/off>, door <open/close>, state, exit");
+
             while (!token.IsCancellationRequested)
             {
                 Console.Write("> ");
@@ -81,7 +93,7 @@ namespace SharedCockpitClient
                 if (string.IsNullOrEmpty(input))
                     continue;
 
-                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase))
+                if (string.Equals(input, "exit", StringComparison.OrdinalIgnoreCase))
                     break;
 
                 var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
@@ -99,9 +111,54 @@ namespace SharedCockpitClient
                             Console.WriteLine("Uso: flaps <valor>");
                         }
                         break;
+
                     case "gear":
                         _ = sync.ToggleGearLocalAsync();
                         break;
+
+                    case "lights":
+                        if (parts.Length >= 2)
+                        {
+                            bool val = string.Equals(parts[1], "on", StringComparison.OrdinalIgnoreCase);
+                            state.Set("Lights", val);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Uso: lights on/off");
+                        }
+                        break;
+
+                    case "engine":
+                        if (parts.Length >= 2)
+                        {
+                            bool val = string.Equals(parts[1], "on", StringComparison.OrdinalIgnoreCase);
+                            state.Set("EngineOn", val);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Uso: engine on/off");
+                        }
+                        break;
+
+                    case "door":
+                        if (parts.Length >= 2)
+                        {
+                            bool val = string.Equals(parts[1], "open", StringComparison.OrdinalIgnoreCase);
+                            state.Set("DoorOpen", val);
+                        }
+                        else
+                        {
+                            Console.WriteLine("Uso: door open/close");
+                        }
+                        break;
+
+                    case "state":
+                        var snapshot = state.GetSnapshot();
+                        Console.WriteLine("📋 Estado actual del avión:");
+                        foreach (var kv in snapshot)
+                            Console.WriteLine($"  {kv.Key} = {kv.Value}");
+                        break;
+
                     default:
                         Console.WriteLine("Comando no reconocido.");
                         break;
@@ -109,9 +166,12 @@ namespace SharedCockpitClient
             }
         }
 
+        /// <summary>
+        /// Devuelve el valor de un argumento CLI.
+        /// </summary>
         private static string? GetArgValue(string[] args, string key)
         {
-            var index = Array.FindIndex(args, a => a.Equals(key, StringComparer.OrdinalIgnoreCase));
+            var index = Array.FindIndex(args, a => a.Equals(key, StringComparison.OrdinalIgnoreCase));
             if (index >= 0 && index + 1 < args.Length)
                 return args[index + 1];
             return null;
