@@ -13,7 +13,7 @@ namespace SharedCockpitClient.Network
 {
     /// <summary>
     /// Servidor WebSocket que maneja las conexiones del copiloto.
-    /// Retrocompatible con el controlador SyncController.
+    /// Retrocompatible con clientes que no envían protocolo.
     /// </summary>
     public class WebSocketHost
     {
@@ -35,10 +35,7 @@ namespace SharedCockpitClient.Network
             listener.Prefixes.Add($"http://+:{port}/");
         }
 
-        public void Start()
-        {
-            _ = Task.Run(RunAsync);
-        }
+        public void Start() => _ = Task.Run(RunAsync);
 
         public void Stop()
         {
@@ -72,10 +69,28 @@ namespace SharedCockpitClient.Network
                         continue;
                     }
 
-                    // 🔧 Sin compresión: handshake limpio
-                    var wsContext = await context.AcceptWebSocketAsync(subProtocol: "sharedcockpit");
-                    var socket = wsContext.WebSocket;
+                    // 🔧 Handshake flexible: aceptar con o sin subprotocolo
+                    WebSocketContext? wsContext = null;
+                    try
+                    {
+                        wsContext = await context.AcceptWebSocketAsync(subProtocol: "sharedcockpit");
+                        Logger.Info("✅ Cliente aceptado con protocolo sharedcockpit.");
+                    }
+                    catch (Exception)
+                    {
+                        try
+                        {
+                            wsContext = await context.AcceptWebSocketAsync(subProtocol: null);
+                            Logger.Warn("⚙️ Cliente aceptado sin protocolo (modo compatibilidad).");
+                        }
+                        catch (Exception inner)
+                        {
+                            Logger.Error($"❌ Error irrecuperable aceptando cliente: {inner.Message}");
+                            continue;
+                        }
+                    }
 
+                    var socket = wsContext.WebSocket;
                     var clientId = Guid.NewGuid();
                     clients[clientId] = socket;
 
@@ -151,14 +166,10 @@ namespace SharedCockpitClient.Network
         public void SendToClient(Guid clientId, string message)
         {
             if (!clients.TryGetValue(clientId, out var socket))
-            {
                 return;
-            }
 
             if (socket.State != WebSocketState.Open)
-            {
                 return;
-            }
 
             _ = SendStringAsync(socket, message);
         }
@@ -179,9 +190,7 @@ namespace SharedCockpitClient.Network
         {
             var bytes = Encoding.UTF8.GetBytes(message);
             if (bytes.Length < 512)
-            {
                 return message;
-            }
 
             try
             {
@@ -190,7 +199,6 @@ namespace SharedCockpitClient.Network
                 {
                     gzip.Write(bytes, 0, bytes.Length);
                 }
-
                 return "gz:" + Convert.ToBase64String(output.ToArray());
             }
             catch
@@ -202,9 +210,7 @@ namespace SharedCockpitClient.Network
         private static string MaybeDecompress(string message)
         {
             if (!message.StartsWith("gz:", StringComparison.Ordinal))
-            {
                 return message;
-            }
 
             try
             {
