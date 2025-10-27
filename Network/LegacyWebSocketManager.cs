@@ -242,8 +242,8 @@ namespace SharedCockpitClient.Network
                     if (!string.Equals(userRole, normalizedRole, StringComparison.OrdinalIgnoreCase))
                     {
                         userRole = normalizedRole;
+                        GlobalFlags.UserRole = userRole;
                         Logger.Info($"✅ Rol asignado localmente: {userRole}");
-                        sim.SetUserRole(userRole);
                     }
                 }
                 return;

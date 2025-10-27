@@ -57,8 +57,7 @@ namespace SharedCockpitClient
                 UpdateConnectionButtons();
                 UpdateStatus("Servidor iniciado.");
 
-                // 🛰️ Iniciar modo simulado interno
-                simConnectManager.EnableMockMode();
+               
 
                 // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
                 wsManager = new LegacyWebSocketManager("ws://127.0.0.1:12345", simConnectManager);
@@ -84,8 +83,7 @@ namespace SharedCockpitClient
                 UpdateConnectionButtons();
                 UpdateStatus("Cliente conectado al servidor.");
 
-                // 🛰️ Iniciar modo simulado interno
-                simConnectManager.EnableMockMode();
+               
 
                 // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
                 wsManager = new LegacyWebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);

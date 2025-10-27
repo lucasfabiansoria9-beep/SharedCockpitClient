@@ -13,6 +13,11 @@ namespace SharedCockpitClient
         public static bool IsLabMode { get; private set; } = InitializeLabMode();
 
         /// <summary>
+        /// Rol actual del usuario (PILOT o COPILOT).
+        /// </summary>
+        public static string UserRole { get; set; } = "PILOT";
+
+        /// <summary>
         /// Fuerza el modo laboratorio desde código (por ejemplo con --lab).
         /// </summary>
         public static void ForceLabMode() => IsLabMode = true;
