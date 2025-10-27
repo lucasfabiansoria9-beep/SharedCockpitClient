@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -259,8 +260,18 @@ namespace SharedCockpitClient.Network
                     root.TryGetProperty("value", out var val))
                 {
                     var variable = v.GetString();
-                    if (!string.IsNullOrEmpty(variable))
-                        aircraftState.ApplyRemoteChange(variable, val);
+                    if (string.IsNullOrEmpty(variable)) return;
+
+                    var source = root.TryGetProperty("source", out var sourceProp)
+                        ? sourceProp.GetString()
+                        : null;
+
+                    if (!string.IsNullOrWhiteSpace(source) && string.Equals(source, sourceTag, StringComparison.Ordinal))
+                        return;
+
+                    aircraftState.ApplyRemoteChange(variable, val);
+                    var formattedValue = val.ValueKind == JsonValueKind.Undefined ? "(undefined)" : val.ToString();
+                    Logger.Info($"[RemoteChange] {variable} = {formattedValue} (desde {source ?? "desconocido"})");
                     return;
                 }
 
@@ -316,14 +327,34 @@ namespace SharedCockpitClient.Network
                 };
                 var json = JsonSerializer.Serialize(payload, jsonOptions);
                 if (isHost)
+                {
                     hostServer?.Broadcast(json);
+                    Logger.Info($"[Broadcast] {variable} = {FormatValue(value)}");
+                }
                 else
+                {
                     ws?.Send(json);
+                    Logger.Info($"[Send] {variable} = {FormatValue(value)}");
+                }
             }
             catch (Exception ex)
             {
                 Logger.Warn($"⚠️ Error enviando estado individual: {ex.Message}");
             }
+        }
+
+        private static string FormatValue(object value)
+        {
+            return value switch
+            {
+                null => "<null>",
+                JsonElement jsonElement => jsonElement.ValueKind == JsonValueKind.Undefined ? "(undefined)" : jsonElement.ToString(),
+                bool b => b ? "true" : "false",
+                double d => d.ToString(CultureInfo.InvariantCulture),
+                float f => f.ToString(CultureInfo.InvariantCulture),
+                IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
+                _ => value.ToString() ?? string.Empty
+            };
         }
 
         private void StartSynchronizationLoop()
