@@ -4,131 +4,140 @@ using Microsoft.FlightSimulator.SimConnect;
 
 namespace SharedCockpitClient.FlightData
 {
-    public class SimConnectManager : IDisposable
+    public sealed class SimConnectManager : IDisposable
     {
         private SimConnect? simconnect;
-        private bool connected;
-        private bool mockMode;
-        private readonly object syncLock = new();
-        private SimStateSnapshot currentSnapshot = new();
+        private bool isMock;
+        private string userRole = "PILOT";
 
+        private readonly AircraftStateManager aircraftState;
+        private readonly object stateLock = new();
         public event Action<SimStateSnapshot>? OnSnapshot;
 
-        public bool IsMockMode => mockMode;
+        private readonly Dictionary<string, object?> liveData = new(StringComparer.OrdinalIgnoreCase);
 
-        public void Initialize(IntPtr windowHandle)
+        public SimConnectManager(AircraftStateManager stateManager)
         {
+            aircraftState = stateManager;
+            isMock = GlobalFlags.IsLabMode; // 🧪 Detecta modo laboratorio automáticamente
+        }
+
+        public void Initialize(IntPtr handle)
+        {
+            if (isMock)
+            {
+                Console.WriteLine("[SimConnect] ⚙️ Modo laboratorio activo. Conexión real omitida.");
+                return;
+            }
+
             try
             {
-                if (mockMode)
-                {
-                    Console.WriteLine("[SimConnect] Modo simulado activo, sin inicializar conexión real.");
-                    return;
-                }
-
-                simconnect = new SimConnect("SharedCockpitClient", windowHandle, 0, null, 0);
-                simconnect.OnRecvSimobjectData += OnSimDataReceived;
-                connected = true;
-                Console.WriteLine("[SimConnect] Inicializado correctamente.");
+                simconnect = new SimConnect("SharedCockpitClient", handle, 0, null, 0);
+                Console.WriteLine("[SimConnect] Conexión establecida correctamente.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] Error al inicializar: {ex.Message}");
+                Console.WriteLine($"[SimConnect] ❌ Error al inicializar: {ex.Message}");
             }
         }
 
+        // === Métodos utilitarios requeridos por otros módulos ===
         public void EnableMockMode()
         {
-            mockMode = true;
-            Console.WriteLine("[SimConnect] Modo simulado activado.");
-        }
-
-        public void ReceiveMessage()
-        {
-            if (!connected || simconnect == null) return;
-            try { simconnect.ReceiveMessage(); }
-            catch (Exception ex) { Console.WriteLine($"[SimConnect] Error recibiendo mensajes: {ex.Message}"); }
-        }
-
-        private void OnSimDataReceived(SimConnect sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
-        {
-            try
-            {
-                var def = (SimDataDefinition)data.dwDefineID;
-                var snapshot = currentSnapshot.Clone();
-
-                switch (def)
-                {
-                    case SimDataDefinition.Attitude: snapshot.Attitude = (AttitudeStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Position: snapshot.Position = (PositionStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Speed: snapshot.Speed = (SpeedStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Controls: snapshot.Controls = (ControlsStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Cabin: snapshot.Cabin = (CabinStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Systems: snapshot.Systems = (SystemsStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Environment: snapshot.Environment = (EnvironmentStruct)data.dwData[0]; break;
-                    case SimDataDefinition.Avionics: snapshot.Avionics = (AvionicsStruct)data.dwData[0]; break;
-                }
-
-                lock (syncLock) currentSnapshot = snapshot;
-                OnSnapshot?.Invoke(snapshot);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[SimConnect] Error procesando datos: {ex.Message}");
-            }
+            isMock = true;
+            Console.WriteLine("[SimConnect] 🧪 Modo laboratorio forzado manualmente.");
         }
 
         public void InjectSnapshot(SimStateSnapshot snapshot)
         {
-            if (snapshot == null) return;
-            lock (syncLock)
-                currentSnapshot = snapshot.Clone();
+            lock (stateLock)
+            {
+                aircraftState.ApplySnapshot(snapshot);
+            }
             OnSnapshot?.Invoke(snapshot);
-        }
-
-        public void ApplyRemoteChanges(Dictionary<string, object?> changes)
-        {
-            if (changes == null) return;
-
-            var updated = currentSnapshot.Clone();
-            foreach (var kvp in changes)
-                updated.TryApplyChange(kvp.Key, kvp.Value);
-
-            lock (syncLock)
-                currentSnapshot = updated;
-
-            OnSnapshot?.Invoke(updated);
-        }
-
-        public SimStateSnapshot GetCurrentSnapshot()
-        {
-            lock (syncLock)
-                return currentSnapshot.Clone();
         }
 
         public void SetUserRole(string role)
         {
-            Console.WriteLine($"[SimConnect] Rol local establecido: {role}");
+            userRole = role;
+            Console.WriteLine($"[SimConnect] Rol configurado: {userRole}");
+        }
+
+        public void UpdateStateFromSim()
+        {
+            var controls = new ControlsStruct
+            {
+                Throttle = TryGetDouble(liveData, "throttle"),
+                Flaps = TryGetDouble(liveData, "flaps"),
+                GearDown = TryGetBool(liveData, "gearDown"),
+                ParkingBrake = TryGetBool(liveData, "parkingBrake")
+            };
+
+            var systems = new SystemsStruct
+            {
+                LightsOn = TryGetBool(liveData, "lightsOn"),
+                DoorOpen = TryGetBool(liveData, "doorOpen"),
+                AvionicsOn = TryGetBool(liveData, "avionicsOn")
+            };
+
+            var snapshot = new SimStateSnapshot
+            {
+                Controls = controls,
+                Systems = systems
+            };
+
+            lock (stateLock)
+            {
+                aircraftState.ApplySnapshot(snapshot);
+            }
+
+            OnSnapshot?.Invoke(snapshot);
+        }
+
+        // 🔹 Nuevo método: recibir mensajes desde SimConnect
+        public void ReceiveMessage()
+        {
+            if (isMock || simconnect == null)
+                return;
+
+            try
+            {
+                simconnect.ReceiveMessage();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SimConnect] ⚠️ Error recibiendo mensaje: {ex.Message}");
+            }
+        }
+
+        private static double TryGetDouble(Dictionary<string, object?> src, string key, double fallback = 0)
+        {
+            if (src.TryGetValue(key, out var v) && v is not null)
+            {
+                if (v is double d) return d;
+                if (v is float f) return f;
+                if (v is int i) return i;
+                if (double.TryParse(v.ToString(), out var p)) return p;
+            }
+            return fallback;
+        }
+
+        private static bool TryGetBool(Dictionary<string, object?> src, string key, bool fallback = false)
+        {
+            if (src.TryGetValue(key, out var v) && v is not null)
+            {
+                if (v is bool b) return b;
+                if (v is int i) return i != 0;
+                if (bool.TryParse(v.ToString(), out var p)) return p;
+                if (double.TryParse(v.ToString(), out var d)) return Math.Abs(d) > 0.5;
+            }
+            return fallback;
         }
 
         public void Dispose()
         {
-            try
-            {
-                if (simconnect != null)
-                {
-                    simconnect.OnRecvSimobjectData -= OnSimDataReceived;
-                    simconnect.Dispose();
-                    simconnect = null;
-                }
-
-                connected = false;
-                Console.WriteLine("[SimConnect] Conexión cerrada correctamente.");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[SimConnect] Error al liberar recursos: {ex.Message}");
-            }
+            simconnect?.Dispose();
+            simconnect = null;
         }
     }
 }

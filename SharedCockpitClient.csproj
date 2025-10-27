@@ -19,6 +19,9 @@
     <Nullable>enable</Nullable>
     <Platforms>AnyCPU;x64</Platforms>
     <StartupObject>SharedCockpitClient.Program</StartupObject>
+
+    <!-- 🔒 Perfil laboratorio: silencia archivos no usados en Fase 1 -->
+    <DefineConstants>$(DefineConstants);LAB_MINIMAL</DefineConstants>
   </PropertyGroup>
 
   <ItemGroup>
@@ -70,6 +73,6 @@
           Condition="'@(NativeSimConnect)' != '' and '$(PublishDir)' != ''" />
   </Target>
 
-  <!-- Abrir el proyecto en Visual Studio, compilar en Release y publicar con el perfil Folder apuntando a:
+  <!-- Abrir en VS, compilar Release y publicar a:
        E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish -->
 </Project>

@@ -10,19 +10,18 @@ namespace SharedCockpitClient
 {
     public partial class MainForm : Form
     {
-        // ---- CAMPOS INICIALIZADOS PARA EVITAR NULLABLE WARNINGS ----
         private TcpListener server = null!;
         private TcpClient client = null!;
         private NetworkStream stream = null!;
         private CancellationTokenSource cts = null!;
         private WebSocketManager wsManager = null!;
-        private SimConnectManager simConnectManager = null!; // ✅ agregado
+        private SimConnectManager simConnectManager = null!;
+        private AircraftStateManager aircraftState = null!;
 
         // ---- EVENTOS INICIALIZADOS VACÍOS ----
         public event Action OnStatusChanged = delegate { };
         public event Action<byte[]> OnDataReceived = delegate { };
 
-        // Estado de conexión
 #pragma warning disable CS0414
         private bool isConnected = false;
 #pragma warning restore CS0414
@@ -34,13 +33,16 @@ namespace SharedCockpitClient
             btnStop.Enabled = false;
             txtIp.TextChanged += txtIp_TextChanged!;
 
-            // ✅ Inicializamos SimConnectManager
-            simConnectManager = new SimConnectManager();
+            // 🧠 Inicializamos el manejador de estado del avión
+            aircraftState = new AircraftStateManager();
+
+            // ✅ Creamos el SimConnectManager con el stateManager correcto
+            simConnectManager = new SimConnectManager(aircraftState);
         }
 
         private void txtIp_TextChanged(object sender, EventArgs e)
         {
-            // Se puede usar para actualizar la IP
+            // Reservado para validación de IP o UI futura
         }
 
         private async void btnHost_Click(object sender, EventArgs e)
@@ -55,7 +57,10 @@ namespace SharedCockpitClient
                 UpdateConnectionButtons();
                 UpdateStatus("Servidor iniciado.");
 
-                // ✅ Inicializamos WebSocketManager con SimConnectManager
+                // 🛰️ Iniciar modo simulado interno
+                simConnectManager.EnableMockMode();
+
+                // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
                 wsManager = new WebSocketManager("ws://127.0.0.1:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();
@@ -79,7 +84,10 @@ namespace SharedCockpitClient
                 UpdateConnectionButtons();
                 UpdateStatus("Cliente conectado al servidor.");
 
-                // ✅ Inicializamos WebSocketManager con SimConnectManager
+                // 🛰️ Iniciar modo simulado interno
+                simConnectManager.EnableMockMode();
+
+                // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
                 wsManager = new WebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();

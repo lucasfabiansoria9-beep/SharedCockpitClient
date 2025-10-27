@@ -1,74 +1,80 @@
+using System;
+using System.Linq;
+using System.Threading.Tasks;
 using SharedCockpitClient.FlightData;
 using SharedCockpitClient.Network;
-using SharedCockpitClient.Utils;
-using System;
-using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
-using System.Threading.Tasks;
 
 namespace SharedCockpitClient
 {
-    internal class Program
+    internal static class Program
     {
         static async Task Main(string[] args)
         {
-            bool useMockSim = args.Length > 0 && args[0].Equals("--mock-sim", StringComparison.OrdinalIgnoreCase);
-            EnsureFirewallRuleOrPrompt(8081);
+            Console.OutputEncoding = System.Text.Encoding.UTF8;
+            Console.Title = "SharedCockpitClient";
 
-            Logger.Info("🛫 Iniciando SharedCockpitClient...");
+            // ───────────────────────────────────────────────────────────────
+            // 1️⃣ PARSEO DE ARGUMENTOS
+            // ───────────────────────────────────────────────────────────────
+            bool labMode = args.Contains("--lab", StringComparer.OrdinalIgnoreCase);
+            string role = GetArgValue(args, "--role") ?? "auto";
+            string peer = GetArgValue(args, "--peer") ?? string.Empty;
 
-            if (useMockSim)
+            if (labMode)
             {
-                Logger.Info("🧪 Modo de simulación interna activo - no se usará SimConnect.");
-                Logger.Info("🧪 Generando datos simulados de vuelo...");
+                GlobalFlags.IsLabMode = true;
+                Console.WriteLine("[Boot] 🧪 Modo laboratorio activado por argumento (--lab).");
+            }
 
-                // No crear ni usar SimConnectManager real
-                var mockManager = new SimConnectManager();
-                var mock = new SimDataMock(mockManager);
-                mock.Start(); // genera snapshots ficticios
+            Console.WriteLine("──────────────────────────────────────────────────────────────");
+            Console.WriteLine("✈️  SharedCockpitClient iniciado");
+            Console.WriteLine($"[Boot] Versión: 1.0 | LabMode={GlobalFlags.IsLabMode} | Role={role} | Peer={peer}");
+            Console.WriteLine("──────────────────────────────────────────────────────────────\n");
 
-                using var sync = new SyncController(mockManager);
+            // ───────────────────────────────────────────────────────────────
+            // 2️⃣ INICIALIZAR COMPONENTES
+            // ───────────────────────────────────────────────────────────────
+            var aircraftState = new AircraftStateManager();
+            var sim = new SimConnectManager(aircraftState);
+            var sync = new SyncController(sim, aircraftState);
+
+            // Establecer rol explícito si se pasa por argumento
+            if (!string.IsNullOrWhiteSpace(role) && role != "auto")
+                sim.SetUserRole(role.ToUpperInvariant());
+
+            // Forzar modo laboratorio si está en pruebas
+            if (GlobalFlags.IsLabMode)
+                sim.EnableMockMode();
+
+            // ───────────────────────────────────────────────────────────────
+            // 3️⃣ ARRANQUE DEL CONTROLADOR DE SINCRONIZACIÓN
+            // ───────────────────────────────────────────────────────────────
+            try
+            {
                 await sync.RunAsync();
             }
-            else
+            catch (Exception ex)
             {
-                using var sim = new SimConnectManager();
-                using var sync = new SyncController(sim);
-                await sync.RunAsync();
+                Console.WriteLine($"[Boot] ❌ Error al ejecutar SyncController: {ex.Message}");
             }
+            finally
+            {
+                sync.Dispose();
+                sim.Dispose();
+            }
+
+            Console.WriteLine("\n[Boot] 🚪 Aplicación finalizada correctamente.");
         }
 
-        static void EnsureFirewallRuleOrPrompt(int port)
+        // ───────────────────────────────────────────────────────────────
+        // FUNCIONES AUXILIARES
+        // ───────────────────────────────────────────────────────────────
+        private static string? GetArgValue(string[] args, string key)
         {
-            try
-            {
-                using var listener = new TcpListener(IPAddress.Any, port);
-                listener.Start();
-                listener.Stop();
-            }
-            catch (SocketException)
-            {
-                // Windows mostrará el aviso de firewall automáticamente
-            }
-
-            try
-            {
-                var process = new Process();
-                process.StartInfo.FileName = "netsh";
-                process.StartInfo.Arguments =
-                    $"advfirewall firewall add rule name=\"SharedCockpitClient\" " +
-                    $"dir=in action=allow protocol=TCP localport={port}";
-                process.StartInfo.Verb = "runas";
-                process.StartInfo.UseShellExecute = true;
-                process.StartInfo.CreateNoWindow = true;
-                process.Start();
-                process.WaitForExit(2000);
-            }
-            catch
-            {
-                // No interrumpir si el usuario cancela
-            }
+            var index = Array.FindIndex(args, a => a.Equals(key, StringComparison.OrdinalIgnoreCase));
+            if (index >= 0 && index + 1 < args.Length)
+                return args[index + 1];
+            return null;
         }
     }
 }

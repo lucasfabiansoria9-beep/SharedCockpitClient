@@ -3,6 +3,9 @@ using System.Threading;
 
 namespace SharedCockpitClient.FlightData
 {
+    /// <summary>
+    /// Genera datos simulados del vuelo (modo Mock) para pruebas sin MSFS2024.
+    /// </summary>
     public class SimDataMock
     {
         private readonly SimConnectManager manager;
@@ -29,36 +32,24 @@ namespace SharedCockpitClient.FlightData
                         Controls = new ControlsStruct
                         {
                             Throttle = rng.NextDouble(),
-                            Flaps = rng.NextDouble(),
-                            Elevator = rng.NextDouble() * 2 - 1,
-                            Aileron = rng.NextDouble() * 2 - 1,
-                            Rudder = rng.NextDouble() * 2 - 1,
-                            ParkingBrake = rng.Next(0, 2),
-                            Spoilers = rng.NextDouble()
+                            Flaps = rng.Next(0, 40),
+                            GearDown = rng.Next(0, 2) == 1,
+                            ParkingBrake = rng.Next(0, 2) == 1
                         },
-                        Cabin = new CabinStruct
+                        Systems = new SystemsStruct
                         {
-                            LandingGearDown = rng.Next(0, 2),
-                            SpoilersDeployed = rng.NextDouble(),
-                            AutopilotOn = rng.Next(0, 2),
-                            AutopilotAltitude = 1000 + rng.NextDouble() * 5000,
-                            AutopilotHeading = rng.NextDouble() * 360
-                        },
-                        Environment = new EnvironmentStruct
-                        {
-                            AmbientTemperature = 20 + rng.NextDouble() * 15,
-                            BarometricPressure = 29.92,
-                            WindVelocity = rng.NextDouble() * 30,
-                            WindDirection = rng.NextDouble() * 360
+                            LightsOn = rng.Next(0, 2) == 1,
+                            DoorOpen = rng.Next(0, 2) == 1,
+                            AvionicsOn = rng.Next(0, 2) == 1
                         }
                     };
 
-                    // ✅ Enviar snapshot mediante método público (no invocar evento directo)
                     manager.InjectSnapshot(snapshot);
                     Thread.Sleep(1000);
                 }
             })
             { IsBackground = true };
+
             worker.Start();
         }
 

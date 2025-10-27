@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
 using System.Net;
 using System.Net.Sockets;
@@ -13,225 +12,214 @@ using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
-#pragma warning disable 0414, 0169 // Evita advertencias por campos no usados
     public sealed class SyncController : IDisposable
     {
         private readonly SimConnectManager sim;
+        private readonly AircraftStateManager aircraftState;
+
         private bool isHost = true;
         private string webSocketUrl = string.Empty;
-        private string localRole = "pilot";
-        private bool warnedNoConnection = false; // Inicializado para evitar advertencias
 
         private WebSocketManager? ws;
         private WebSocketHost? hostServer;
-        private NetworkDiscovery? discovery;
+
         private CancellationTokenSource? loopToken;
         private System.Threading.Timer? syncTimer;
 
         private readonly object snapshotLock = new();
         private SimStateSnapshot? pendingSnapshot;
-        private SimStateSnapshot? lastSentSnapshot;
         private bool hasPendingSnapshot;
 
         private readonly string sourceTag = Guid.NewGuid().ToString();
-        private readonly JsonSerializerOptions jsonOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        };
+        private readonly JsonSerializerOptions jsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
-        private static readonly HashSet<string> SyncGroups = new(StringComparer.OrdinalIgnoreCase)
-        {
-            "controls","systems","cabin","environment","avionics","doors","ground"
-        };
-
-        public SyncController(SimConnectManager sim)
+        public SyncController(SimConnectManager sim, AircraftStateManager aircraftState)
         {
             this.sim = sim ?? throw new ArgumentNullException(nameof(sim));
+            this.aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
+
             this.sim.OnSnapshot += OnLocalSnapshot;
+            this.aircraftState.OnStateChanged += OnLocalStateChanged;
         }
 
         public async Task RunAsync()
         {
             Console.OutputEncoding = Encoding.UTF8;
+
             ConfigureMode();
             SetupWebSocket();
             SetupShutdownHandlers();
 
-            // 🧩 Detección automática de MSFS2024
-            bool msfsRunning = false;
+            // Detectar MSFS y forzar mock si no está
             try
             {
-                msfsRunning = System.Diagnostics.Process.GetProcessesByName("FlightSimulator").Any();
-                if (!msfsRunning)
-                {
-                    Logger.Warn("🧩 No se detectó MSFS2024. Ejecutando en modo simulación interna.");
-                    sim.EnableMockMode();
-                }
-                else
-                {
-                    Logger.Info("🛫 MSFS2024 detectado. Inicializando conexión real con SimConnect...");
-                }
+                var msfsRunning = System.Diagnostics.Process.GetProcessesByName("FlightSimulator").Any();
+                if (!msfsRunning) sim.EnableMockMode();
             }
-            catch (Exception ex)
+            catch
             {
-                Logger.Warn($"⚠️ Error detectando MSFS2024: {ex.Message}");
                 sim.EnableMockMode();
             }
 
-            Logger.Info($"🟢 Modo de simulación activo: {(msfsRunning ? "Real (SimConnect)" : "Interno (Mock)")}");
-
-            // ✅ Inicialización automática
             sim.Initialize(IntPtr.Zero);
-            Logger.Info("✅ Inicialización de SimConnect completada (modo automático).");
 
             StartSynchronizationLoop();
-            Logger.Info("Presiona Ctrl+C para cerrar la aplicación.");
-            Logger.Info("🌍 Cabina compartida activa: sincronización total entre piloto y copiloto.");
+
+            Logger.Info("Modo manual: comandos -> throttle 0.8 | flaps 15 | gear | brake | lights | door | avionics | exit");
 
             using var cts = new CancellationTokenSource();
             loopToken = cts;
-            try
+
+            _ = Task.Run(async () =>
             {
-                while (!cts.IsCancellationRequested)
+                try
                 {
-                    sim.ReceiveMessage();
-                    await Task.Delay(100, cts.Token);
+                    while (!cts.IsCancellationRequested)
+                    {
+                        // Si tu SimConnectManager expone ReceiveMessage, mantenemos el loop
+                        sim.ReceiveMessage();
+                        await Task.Delay(100, cts.Token);
+                    }
                 }
-            }
-            catch (TaskCanceledException) { }
+                catch (TaskCanceledException) { }
+            });
+
+            // Bucle de prueba manual
+            RunManualTestLoop();
         }
 
+        // ─────────────────────────────────────────────────────────────────────────────
+        // MODO MANUAL (LAB)
+        // ─────────────────────────────────────────────────────────────────────────────
+        private void RunManualTestLoop()
+        {
+            while (true)
+            {
+                Console.Write("> ");
+                var input = Console.ReadLine()?.Trim();
+                if (string.IsNullOrEmpty(input)) continue;
+                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
+
+                var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                var cmd = parts[0].ToLowerInvariant();
+                double numValue;
+                bool boolValue;
+
+                try
+                {
+                    switch (cmd)
+                    {
+                        case "throttle":
+                            if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out numValue))
+                                aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.Throttle),
+                                    JsonDocument.Parse(numValue.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement);
+                            else
+                                Logger.Warn("Uso: throttle <0..1>");
+                            break;
+
+                        case "flaps":
+                            if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out numValue))
+                                aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.Flaps),
+                                    JsonDocument.Parse(numValue.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement);
+                            else
+                                Logger.Warn("Uso: flaps <grados>");
+                            break;
+
+                        case "gear":
+                            boolValue = !aircraftState.GearDown;
+                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.GearDown),
+                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
+                            break;
+
+                        case "brake":
+                            boolValue = !aircraftState.ParkingBrake;
+                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.ParkingBrake),
+                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
+                            break;
+
+                        case "lights":
+                            boolValue = !aircraftState.LightsOn;
+                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.LightsOn),
+                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
+                            break;
+
+                        case "door":
+                            boolValue = !aircraftState.DoorOpen;
+                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.DoorOpen),
+                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
+                            break;
+
+                        case "avionics":
+                            boolValue = !aircraftState.AvionicsOn;
+                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.AvionicsOn),
+                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
+                            break;
+
+                        default:
+                            Logger.Warn("Comando inválido. Usa: throttle 0.8 | flaps 15 | gear | brake | lights | door | avionics | exit");
+                            break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"⚠️ Error ejecutando comando: {ex.Message}");
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // CONFIGURACIÓN
+        // ─────────────────────────────────────────────────────────────────────────────
         private void ConfigureMode()
         {
-            Logger.Info("Selecciona modo de operación:");
-            Logger.Info("1) Host (piloto principal)");
-            Logger.Info("2) Cliente (copiloto)");
+            Console.WriteLine("Selecciona modo: 1) Host  2) Cliente");
             Console.Write("> ");
-            var option = Console.ReadLine();
-            isHost = option?.Trim() != "2";
+            var opt = Console.ReadLine();
+            isHost = opt?.Trim() != "2";
 
             if (isHost)
             {
                 var localIp = GetLocalIpAddress();
-                Logger.Info("✈️ Configurando sesión de vuelo...");
-                Console.Write("🪪 Nombre de cabina compartida: ");
-                var sessionName = Console.ReadLine()?.Trim();
-                if (string.IsNullOrWhiteSpace(sessionName))
-                    sessionName = "Cabina_" + Environment.MachineName;
+                Console.Write("Nombre de cabina: ");
+                var name = Console.ReadLine()?.Trim();
+                if (string.IsNullOrWhiteSpace(name)) name = "Cabina";
 
-                Console.Write("🔓 ¿Hacer la cabina pública? (S/N): ");
-                var pub = Console.ReadLine()?.Trim().ToUpperInvariant() == "S";
-                string password = "";
-                if (!pub)
-                {
-                    Console.Write("🔑 Ingrese una contraseña para la cabina: ");
-                    password = Console.ReadLine() ?? "";
-                }
+                Console.Write("¿Cabina pública? (S/N): ");
+                bool pub = (Console.ReadLine()?.Trim().ToUpperInvariant() == "S");
 
-                discovery = new NetworkDiscovery(sessionName, localIp, 8081);
-                discovery.StartBroadcast(pub, password);
+                Console.WriteLine($"🚀 Cabina '{name}' iniciada en ws://{localIp}:8081 ({(pub ? "pública" : "privada")})");
 
-                Logger.Info($"🚀 Cabina '{sessionName}' iniciada en {(pub ? "modo Público" : "Privado 🔒")}.");
-                Logger.Info($"🛰️ Dirección: ws://{localIp}:8081");
-                Logger.Info("Esperando conexión del copiloto...");
-
-                localRole = "pilot";
-                sim.SetUserRole("PILOT");
-            }
-            else
-            {
-                discovery = new NetworkDiscovery(Environment.MachineName, "0.0.0.0", 8081);
-                discovery.StartListening();
-
-                var available = new List<(string Name, string Ip, bool IsPublic)>();
-                discovery.OnHostDiscovered += (ip, name, pub) =>
-                {
-                    if (available.All(a => a.Ip != ip))
-                        available.Add((name, ip, pub));
-                };
-
-                Logger.Info("🔍 Buscando cabinas compartidas activas en la red local...");
-                int waitCounter = 0;
-                while (available.Count == 0)
-                {
-                    waitCounter++;
-                    Logger.Info($"⏳ Esperando que aparezcan sesiones... (Intento {waitCounter})");
-                    Thread.Sleep(3000);
-                }
-
-                Logger.Info("📡 Cabinas detectadas:");
-                for (int i = 0; i < available.Count; i++)
-                {
-                    var mode = available[i].IsPublic ? "Pública" : "Privada 🔒";
-                    Logger.Info($"{i + 1}) {available[i].Name} ({mode}) - {available[i].Ip}");
-                }
-
-                Console.Write("👉 Ingresá el número o nombre de la cabina a la que querés conectarte: ");
-                var choice = Console.ReadLine()?.Trim();
-
-                (string Name, string Ip, bool IsPublic)? selected = null;
-                if (int.TryParse(choice, out var num) && num > 0 && num <= available.Count)
-                    selected = available[num - 1];
-                else
-                    selected = available.FirstOrDefault(a => a.Name.Equals(choice, StringComparison.OrdinalIgnoreCase));
-
-                if (selected == null)
-                {
-                    Logger.Error("❌ Cabina no encontrada. Volvé a intentarlo.");
-                    Environment.Exit(0);
-                }
-
-                if (!selected.Value.IsPublic)
-                {
-                    Console.Write("🔑 Ingresá la contraseña: ");
-                    var entered = Console.ReadLine() ?? "";
-                    if (!discovery.ValidatePassword(selected.Value.Name, entered))
-                    {
-                        Logger.Error("🚫 Contraseña incorrecta. No se puede conectar a esta cabina.");
-                        Environment.Exit(0);
-                    }
-                }
-
-                webSocketUrl = $"ws://{selected.Value.Ip}:8081";
-                Logger.Info($"🌍 Intentando conectar con {webSocketUrl}...");
-                localRole = "copilot";
-                sim.SetUserRole("COPILOT");
-            }
-        }
-
-        private void SetupWebSocket()
-        {
-            if (isHost)
-            {
                 hostServer = new WebSocketHost(8081);
-                hostServer.OnClientConnected += (id) =>
-                {
-                    Logger.Info("🟢 Copiloto conectado correctamente.");
-                    SendFullSnapshotToClient(id);
-                };
-                hostServer.OnClientDisconnected += (id) => Logger.Warn("🔴 Copiloto desconectado.");
+                hostServer.OnClientConnected += id => Logger.Info($"✅ Cliente conectado ({id})");
                 hostServer.OnMessage += OnWebSocketMessage;
                 hostServer.Start();
             }
             else
             {
-                ws = new WebSocketManager(webSocketUrl, sim);
-                ws.OnOpen += () => { Logger.Info("✅ Conectado correctamente al host (piloto)."); SendFullSnapshotToHost(); };
-                ws.OnError += (msg) => Logger.Error("❌ No se pudo conectar al host: " + msg);
-                ws.OnClose += () => Logger.Warn("🔌 Conexión cerrada.");
-                ws.OnMessage += OnWebSocketMessage;
-                ws.Connect();
+                Console.WriteLine("👂 Escuchando broadcasts LAN (simplificado)...");
+                // Simplificado: seteamos una IP manual (ajustá si querés)
+                var ip = "192.168.58.117";
+                webSocketUrl = $"ws://{ip}:8081";
             }
         }
 
         private static string GetLocalIpAddress()
         {
-            try
-            {
-                return Dns.GetHostAddresses(Dns.GetHostName())
-                    .FirstOrDefault(ip => ip.AddressFamily == AddressFamily.InterNetwork)?.ToString() ?? "127.0.0.1";
-            }
-            catch { return "127.0.0.1"; }
+            var ip = Dns.GetHostAddresses(Dns.GetHostName())
+                .FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);
+            return ip?.ToString() ?? "127.0.0.1";
+        }
+
+        private void SetupWebSocket()
+        {
+            if (isHost) return;
+
+            ws = new WebSocketManager(webSocketUrl, sim);
+            ws.OnOpen += () => Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
+            ws.OnMessage += OnWebSocketMessage;
+            ws.OnError += msg => Logger.Warn($"Error WS: {msg}");
+            ws.OnClose += () => Logger.Warn("Conexión WS cerrada.");
+            ws.Connect();
         }
 
         private void SetupShutdownHandlers()
@@ -240,111 +228,17 @@ namespace SharedCockpitClient.Network
             {
                 e.Cancel = true;
                 Shutdown();
-                loopToken?.Cancel();
                 Environment.Exit(0);
             };
-            AppDomain.CurrentDomain.ProcessExit += (_, __) => Shutdown();
         }
 
+        // ─────────────────────────────────────────────────────────────────────────────
+        // RECEPCIÓN Y ENVÍO
+        // ─────────────────────────────────────────────────────────────────────────────
         private void OnWebSocketMessage(string message)
         {
             if (string.IsNullOrWhiteSpace(message)) return;
-            if (message.StartsWith("ROLE:", StringComparison.OrdinalIgnoreCase))
-            {
-                sim.SetUserRole(message.Substring(5).Trim());
-                return;
-            }
             ApplyRemotePayload(message);
-        }
-
-        private void Shutdown()
-        {
-            syncTimer?.Dispose();
-            try { ws?.Close(); } catch { }
-            try { hostServer?.Stop(); } catch { }
-            try { sim.Dispose(); } catch { }
-            discovery?.Stop();
-        }
-
-        public void Dispose()
-        {
-            sim.OnSnapshot -= OnLocalSnapshot;
-            Shutdown();
-        }
-
-        private void StartSynchronizationLoop()
-        {
-            if (syncTimer != null) return;
-            syncTimer = new System.Threading.Timer(OnSyncTimerTick, null, TimeSpan.Zero, TimeSpan.FromMilliseconds(100));
-        }
-
-        private void OnLocalSnapshot(SimStateSnapshot snapshot)
-        {
-            if (snapshot == null) return;
-            lock (snapshotLock)
-            {
-                pendingSnapshot = snapshot.Clone();
-                hasPendingSnapshot = true;
-            }
-        }
-
-        private void OnSyncTimerTick(object? state)
-        {
-            try
-            {
-                SimStateSnapshot? snapshot;
-                lock (snapshotLock)
-                {
-                    if (!hasPendingSnapshot || pendingSnapshot == null) return;
-                    snapshot = pendingSnapshot;
-                    pendingSnapshot = null;
-                    hasPendingSnapshot = false;
-                }
-                var diff = ComputeDiff(snapshot, lastSentSnapshot);
-                if (diff.Count == 0) return;
-                SendSyncUpdate(diff, snapshot);
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"⚠️ Error en bucle de sincronización: {ex.Message}");
-            }
-        }
-
-        private void SendSyncUpdate(IReadOnlyDictionary<string, object?> changes, SimStateSnapshot snapshot)
-        {
-            var payload = new { type = "sync-update", source = sourceTag, timestamp = DateTime.UtcNow.ToString("o"), changes };
-            var json = JsonSerializer.Serialize(payload, jsonOptions);
-            BroadcastPayload(json);
-            lastSentSnapshot = snapshot.Clone();
-        }
-
-        private void BroadcastPayload(string payload)
-        {
-            if (isHost)
-                hostServer?.Broadcast(payload);
-            else
-                ws?.Send(payload);
-        }
-
-        private Dictionary<string, object?> ComputeDiff(SimStateSnapshot current, SimStateSnapshot? previous)
-        {
-            var cur = FlattenSnapshot(current);
-            var prev = previous != null ? FlattenSnapshot(previous) : new();
-            var diff = new Dictionary<string, object?>();
-            foreach (var kv in cur)
-                if (!prev.TryGetValue(kv.Key, out var old) || !Equals(old, kv.Value))
-                    diff[kv.Key] = kv.Value;
-            return diff;
-        }
-
-        private static Dictionary<string, object?> FlattenSnapshot(SimStateSnapshot snapshot)
-        {
-            var data = snapshot.ToDictionary();
-            var flat = new Dictionary<string, object?>();
-            foreach (var group in data)
-                if (SyncGroups.Contains(group.Key) && group.Value is IDictionary<string, object?> d)
-                    foreach (var kv in d) flat[$"{group.Key}.{kv.Key}"] = kv.Value;
-            return flat;
         }
 
         private void ApplyRemotePayload(string message)
@@ -353,11 +247,43 @@ namespace SharedCockpitClient.Network
             {
                 using var doc = JsonDocument.Parse(message);
                 var root = doc.RootElement;
-                var type = root.GetProperty("type").GetString();
-                if (type == "sync-update" && root.TryGetProperty("changes", out var changesElement))
+
+                if (!root.TryGetProperty("type", out var typeProp))
+                    return;
+
+                var type = typeProp.GetString();
+
+                // Cambios puntuales: aircraft_state
+                if (type == "aircraft_state" &&
+                    root.TryGetProperty("variable", out var v) &&
+                    root.TryGetProperty("value", out var val))
                 {
-                    var changes = changesElement.EnumerateObject().ToDictionary(p => p.Name, p => (object?)p.Value.ToString());
-                    sim.ApplyRemoteChanges(changes);
+                    var variable = v.GetString();
+                    if (!string.IsNullOrEmpty(variable))
+                        aircraftState.ApplyRemoteChange(variable, val);
+                    return;
+                }
+
+                // Actualización de snapshot (plano): sync-update
+                if (type == "sync-update" && root.TryGetProperty("changes", out var changes))
+                {
+                    var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var prop in changes.EnumerateObject())
+                    {
+                        object? boxed = prop.Value.ValueKind switch
+                        {
+                            JsonValueKind.Number => prop.Value.TryGetDouble(out var d) ? d : (object?)prop.Value.ToString(),
+                            JsonValueKind.True => true,
+                            JsonValueKind.False => false,
+                            JsonValueKind.String => prop.Value.GetString(),
+                            _ => prop.Value.ToString()
+                        };
+                        dict[prop.Name] = boxed;
+                    }
+
+                    // Mapear diccionario plano -> snapshot y aplicarlo
+                    var incoming = BuildSnapshotFromFlat(dict);
+                    sim.InjectSnapshot(incoming);
                 }
             }
             catch (Exception ex)
@@ -366,19 +292,166 @@ namespace SharedCockpitClient.Network
             }
         }
 
-        private void SendFullSnapshotToClient(Guid id)
+        private void OnLocalSnapshot(SimStateSnapshot snap)
         {
-            var s = sim.GetCurrentSnapshot();
-            var json = JsonSerializer.Serialize(s.ToDictionary(), jsonOptions);
-            hostServer?.SendToClient(id, json);
+            lock (snapshotLock)
+            {
+                // Si tu SimStateSnapshot tiene Clone(), perfecto; sino, podemos asignar directo.
+                pendingSnapshot = snap?.Clone() ?? snap;
+                hasPendingSnapshot = pendingSnapshot is not null;
+            }
         }
 
-        private void SendFullSnapshotToHost()
+        private void OnLocalStateChanged(string variable, object value)
         {
-            var s = sim.GetCurrentSnapshot();
-            var json = JsonSerializer.Serialize(s.ToDictionary(), jsonOptions);
-            ws?.Send(json);
+            try
+            {
+                var payload = new
+                {
+                    type = "aircraft_state",
+                    variable,
+                    value,
+                    source = sourceTag,
+                    timestamp = DateTime.UtcNow.ToString("o")
+                };
+                var json = JsonSerializer.Serialize(payload, jsonOptions);
+                if (isHost)
+                    hostServer?.Broadcast(json);
+                else
+                    ws?.Send(json);
+            }
+            catch (Exception ex)
+            {
+                Logger.Warn($"⚠️ Error enviando estado individual: {ex.Message}");
+            }
         }
+
+        private void StartSynchronizationLoop()
+        {
+            if (syncTimer != null) return;
+
+            syncTimer = new System.Threading.Timer(_ =>
+            {
+                try
+                {
+                    SimStateSnapshot? snapshot;
+                    lock (snapshotLock)
+                    {
+                        if (!hasPendingSnapshot || pendingSnapshot == null) return;
+                        snapshot = pendingSnapshot;
+                        hasPendingSnapshot = false;
+                        pendingSnapshot = null;
+                    }
+
+                    // 🔁 Enviar snapshot FLAT para que el peer lo entienda
+                    var flat = FlattenSnapshot(snapshot);
+
+                    var json = JsonSerializer.Serialize(new
+                    {
+                        type = "sync-update",
+                        changes = flat
+                    }, jsonOptions);
+
+                    if (isHost) hostServer?.Broadcast(json);
+                    else ws?.Send(json);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"Error en loop de sync: {ex.Message}");
+                }
+            },
+            null,
+            TimeSpan.Zero,
+            TimeSpan.FromMilliseconds(300));
+        }
+
+        // Pasar el snapshot (con grupos) a un diccionario plano
+        private static Dictionary<string, object?> FlattenSnapshot(SimStateSnapshot snap)
+        {
+            var flat = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
+            // ControlsStruct (struct no-nullable)
+            if (!snap.Controls.Equals(default(ControlsStruct)))
+            {
+                var c = snap.Controls;
+                flat["throttle"] = c.Throttle;
+                flat["flaps"] = c.Flaps;
+                flat["gearDown"] = c.GearDown;
+                flat["parkingBrake"] = c.ParkingBrake;
+            }
+
+            // SystemsStruct (struct no-nullable)
+            if (!snap.Systems.Equals(default(SystemsStruct)))
+            {
+                var s = snap.Systems;
+                flat["lightsOn"] = s.LightsOn;
+                flat["doorOpen"] = s.DoorOpen;
+                flat["avionicsOn"] = s.AvionicsOn;
+            }
+
+            return flat;
+        }
+
+        // Construye un snapshot desde un diccionario plano "flat"
+        private static SimStateSnapshot BuildSnapshotFromFlat(Dictionary<string, object?> flat)
+        {
+            var controls = new ControlsStruct
+            {
+                Throttle = GetDouble(flat, "throttle"),
+                Flaps = GetDouble(flat, "flaps"),
+                GearDown = GetBool(flat, "gearDown"),
+                ParkingBrake = GetBool(flat, "parkingBrake")
+            };
+
+            var systems = new SystemsStruct
+            {
+                LightsOn = GetBool(flat, "lightsOn"),
+                DoorOpen = GetBool(flat, "doorOpen"),
+                AvionicsOn = GetBool(flat, "avionicsOn")
+            };
+
+            return new SimStateSnapshot
+            {
+                Controls = controls,
+                Systems = systems
+            };
+        }
+
+        private static double GetDouble(IDictionary<string, object?> dict, string key, double fallback = 0)
+        {
+            if (dict.TryGetValue(key, out var v) && v is not null)
+            {
+                if (v is double d) return d;
+                if (v is float f) return f;
+                if (v is int i) return i;
+                if (double.TryParse(v.ToString(), out var p)) return p;
+            }
+            return fallback;
+        }
+
+        private static bool GetBool(IDictionary<string, object?> dict, string key, bool fallback = false)
+        {
+            if (dict.TryGetValue(key, out var v) && v is not null)
+            {
+                if (v is bool b) return b;
+                if (v is int i) return i != 0;
+                if (bool.TryParse(v.ToString(), out var p)) return p;
+                if (double.TryParse(v.ToString(), out var d)) return Math.Abs(d) > 0.5;
+            }
+            return fallback;
+        }
+
+        // ─────────────────────────────────────────────────────────────────────────────
+        // SHUTDOWN
+        // ─────────────────────────────────────────────────────────────────────────────
+        private void Shutdown()
+        {
+            syncTimer?.Dispose();
+            try { ws?.Close(); } catch { }
+            try { hostServer?.Stop(); } catch { }
+            try { sim.Dispose(); } catch { }
+        }
+
+        public void Dispose() => Shutdown();
     }
-#pragma warning restore 0414, 0169
 }

@@ -1,229 +1,78 @@
 using System;
-using System.Collections.Generic;
-using System.Globalization;
-using System.Runtime.InteropServices;
-using Microsoft.FlightSimulator.SimConnect;
 
 namespace SharedCockpitClient.FlightData
 {
-    // ──────────────────────────────
-    // 📦 ESTRUCTURAS DE DATOS BASE
-    // ──────────────────────────────
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct AttitudeStruct
-    {
-        public double Pitch;
-        public double Bank;
-        public double Heading;
-    }
+    /// <summary>
+    /// Estructuras base del estado del simulador: controles, sistemas, cabina y entorno.
+    /// </summary>
 
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct PositionStruct
-    {
-        public double Latitude;
-        public double Longitude;
-        public double Altitude;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct SpeedStruct
-    {
-        public double IndicatedAirspeed;
-        public double VerticalSpeed;
-        public double GroundSpeed;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    // -------------------------------
+    // CONTROLES DE VUELO Y SUPERFICIES
+    // -------------------------------
     public struct ControlsStruct
     {
-        public double Throttle;
-        public double Flaps;
-        public double Elevator;
-        public double Aileron;
-        public double Rudder;
-        public double ParkingBrake;
-        public double Spoilers;
+        public double Throttle;        // 0.0 – 1.0
+        public double Flaps;           // 0 – 40 grados
+        public bool GearDown;          // tren extendido
+        public bool ParkingBrake;      // freno de parqueo
+        public double Elevator;        // eje de profundidad
+        public double Aileron;         // alabeo
+        public double Rudder;          // guiñada
+        public double Spoilers;        // spoilers extendidos 0–1
     }
 
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    // -------------------------------
+    // SISTEMAS ELÉCTRICOS / AVIÓNICOS
+    // -------------------------------
+    public struct SystemsStruct
+    {
+        public bool LightsOn;          // luces generales
+        public bool DoorOpen;          // puerta abierta
+        public bool AvionicsOn;        // aviónica energizada
+    }
+
+    // -------------------------------
+    // CABINA Y SISTEMAS INTERNOS
+    // -------------------------------
     public struct CabinStruct
     {
-        public int LandingGearDown;
+        public bool LandingGearDown;
         public double SpoilersDeployed;
-        public int AutopilotOn;
+        public bool AutopilotOn;
         public double AutopilotAltitude;
         public double AutopilotHeading;
     }
 
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct SystemsStruct
-    {
-        public int LandingLight;
-        public int BeaconLight;
-        public int NavLight;
-        public int StrobeLight;
-        public int TaxiLight;
-        public int BatteryMaster;
-        public int Alternator;
-        public int AvionicsMaster;
-        public int FuelPump;
-        public int PitotHeat;
-        public int AntiIce;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct DoorsStruct
-    {
-        public int DoorLeftOpen;
-        public int DoorRightOpen;
-        public int CargoDoorOpen;
-        public int RampOpen;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct GroundSupportStruct
-    {
-        public int CateringTruckPresent;
-        public int BaggageCartsPresent;
-        public int FuelTruckPresent;
-    }
-
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
+    // -------------------------------
+    // ENTORNO / ATMÓSFERA
+    // -------------------------------
     public struct EnvironmentStruct
     {
         public double AmbientTemperature;
-        public double TotalAirTemperature;
         public double BarometricPressure;
         public double WindVelocity;
         public double WindDirection;
-        public double PrecipitationRate;
     }
 
-    [StructLayout(LayoutKind.Sequential, Pack = 1)]
-    public struct AvionicsStruct
+    // -------------------------------
+    // SNAPSHOT GLOBAL
+    // -------------------------------
+    public partial class SimStateSnapshot
     {
-        public double Com1Active;
-        public double Com1Standby;
-        public double Nav1Active;
-        public double Nav1Standby;
-        public double TransponderCode;
-        public double AutopilotNavLock;
-    }
+        public ControlsStruct Controls { get; set; }
+        public SystemsStruct Systems { get; set; }
+        public CabinStruct Cabin { get; set; }
+        public EnvironmentStruct Environment { get; set; }
 
-    // ──────────────────────────────
-    // ✈️ SNAPSHOT PRINCIPAL DE ESTADO
-    // ──────────────────────────────
-    public class SimStateSnapshot
-    {
-        public AttitudeStruct Attitude;
-        public PositionStruct Position;
-        public SpeedStruct Speed;
-        public ControlsStruct Controls;
-        public CabinStruct Cabin;
-        public SystemsStruct Systems;
-        public DoorsStruct Doors;
-        public GroundSupportStruct Ground;
-        public EnvironmentStruct Environment;
-        public AvionicsStruct Avionics;
-
-        public SimStateSnapshot Clone() => (SimStateSnapshot)MemberwiseClone();
-
-        public Dictionary<string, object?> ToDictionary()
+        public SimStateSnapshot Clone()
         {
-            return new Dictionary<string, object?>
+            return new SimStateSnapshot
             {
-                ["controls"] = new Dictionary<string, object?>
-                {
-                    ["throttle"] = Controls.Throttle,
-                    ["flaps"] = Controls.Flaps,
-                    ["elevator"] = Controls.Elevator,
-                    ["aileron"] = Controls.Aileron,
-                    ["rudder"] = Controls.Rudder,
-                    ["parkingBrake"] = Controls.ParkingBrake,
-                    ["spoilers"] = Controls.Spoilers
-                },
-                ["cabin"] = new Dictionary<string, object?>
-                {
-                    ["landingGearDown"] = Cabin.LandingGearDown,
-                    ["spoilersDeployed"] = Cabin.SpoilersDeployed,
-                    ["autopilotOn"] = Cabin.AutopilotOn,
-                    ["autopilotAltitude"] = Cabin.AutopilotAltitude,
-                    ["autopilotHeading"] = Cabin.AutopilotHeading
-                }
+                Controls = Controls,
+                Systems = Systems,
+                Cabin = Cabin,
+                Environment = Environment
             };
         }
-
-        public bool TryApplyChange(string key, object? value)
-        {
-            if (string.IsNullOrWhiteSpace(key)) return false;
-            var parts = key.Split('.', 2);
-            if (parts.Length != 2) return false;
-
-            switch (parts[0])
-            {
-                case "controls": return ApplyControls(parts[1], value);
-                case "cabin": return ApplyCabin(parts[1], value);
-                default: return false;
-            }
-        }
-
-        private bool ApplyControls(string field, object? value)
-        {
-            if (!TryGetDouble(value, out var n)) return false;
-            switch (field)
-            {
-                case "throttle": Controls.Throttle = n; break;
-                case "flaps": Controls.Flaps = n; break;
-                case "elevator": Controls.Elevator = n; break;
-                case "aileron": Controls.Aileron = n; break;
-                case "rudder": Controls.Rudder = n; break;
-                case "parkingBrake": Controls.ParkingBrake = n; break;
-                case "spoilers": Controls.Spoilers = n; break;
-            }
-            return true;
-        }
-
-        private bool ApplyCabin(string field, object? value)
-        {
-            if (!TryGetDouble(value, out var n)) return false;
-            switch (field)
-            {
-                case "spoilersDeployed": Cabin.SpoilersDeployed = n; break;
-                case "autopilotAltitude": Cabin.AutopilotAltitude = n; break;
-                case "autopilotHeading": Cabin.AutopilotHeading = n; break;
-            }
-            return true;
-        }
-
-        private static bool TryGetDouble(object? value, out double number)
-        {
-            switch (value)
-            {
-                case null: number = 0; return false;
-                case double d: number = d; return true;
-                case float f: number = f; return true;
-                case int i: number = i; return true;
-                case long l: number = l; return true;
-                case string s when double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed): number = parsed; return true;
-                default: number = 0; return false;
-            }
-        }
-    }
-
-    // ──────────────────────────────
-    // ENUM DE DEFINICIONES SIMCONNECT
-    // ──────────────────────────────
-    public enum SimDataDefinition
-    {
-        Attitude,
-        Position,
-        Speed,
-        Controls,
-        Cabin,
-        Systems,
-        Doors,
-        Ground,
-        Environment,
-        Avionics
     }
 }

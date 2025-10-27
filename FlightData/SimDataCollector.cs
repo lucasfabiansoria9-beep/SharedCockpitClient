@@ -1,5 +1,5 @@
+#if !LAB_MINIMAL
 using System;
-using System.Collections.Generic;
 
 namespace SharedCockpitClient.FlightData
 {
@@ -46,3 +46,4 @@ namespace SharedCockpitClient.FlightData
         }
     }
 }
+#endif

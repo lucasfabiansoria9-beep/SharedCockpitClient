@@ -1,3 +1,4 @@
+#if !LAB_MINIMAL
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -399,3 +400,4 @@ public sealed class SimCommandApplier
         HIGHEST = 1
     }
 }
+#endif
