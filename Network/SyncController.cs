@@ -1,8 +1,7 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
-using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -29,18 +28,23 @@ namespace SharedCockpitClient.Network
         private System.Threading.Timer? syncTimer;
 
         private readonly object snapshotLock = new();
-        private SimStateSnapshot? latestSnapshot;
-        private SimStateSnapshot? lastSentSnapshot;
-
-        private readonly object connectionLock = new();
-        private bool isPeerConnected;
-        private bool wasEverConnected;
-        private bool syncPauseLogged;
-
-        private readonly TimeSpan continuousSyncInterval = TimeSpan.FromMilliseconds(150);
+        private SimStateSnapshot? pendingSnapshot;
+        private bool hasPendingSnapshot;
 
         private readonly string sourceTag = Guid.NewGuid().ToString();
         private readonly JsonSerializerOptions jsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
+
+        // Anti-eco general (sincrónico inmediato)
+        private int _suppressOutbound;
+
+        // Anti-eco por variable: suprime emisiones de una variable hasta este instante (para cubrir animaciones async)
+        private readonly ConcurrentDictionary<string, DateTime> _suppressUntilByVar = new(StringComparer.OrdinalIgnoreCase);
+
+        // Para filtrar ruido: recordar último valor emitido por variable y aplicar EPS
+        private readonly ConcurrentDictionary<string, double> _lastSentNumeric = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, bool> _lastSentBool = new(StringComparer.OrdinalIgnoreCase);
+
+        private const double EPS_NUM = 0.02; // umbral de cambio mínimo para emitir valores numéricos
 
         public SyncController(SimConnectManager sim, AircraftStateManager aircraftState)
         {
@@ -59,19 +63,14 @@ namespace SharedCockpitClient.Network
             SetupWebSocket();
             SetupShutdownHandlers();
 
-            // Detectar MSFS y forzar mock si no está
             try
             {
                 var msfsRunning = System.Diagnostics.Process.GetProcessesByName("FlightSimulator").Any();
                 if (!msfsRunning) sim.EnableMockMode();
             }
-            catch
-            {
-                sim.EnableMockMode();
-            }
+            catch { sim.EnableMockMode(); }
 
             sim.Initialize(IntPtr.Zero);
-
             StartSynchronizationLoop();
 
             Logger.Info("Modo manual: comandos -> throttle 0.8 | flaps 15 | gear | brake | lights | door | avionics | exit");
@@ -85,7 +84,6 @@ namespace SharedCockpitClient.Network
                 {
                     while (!cts.IsCancellationRequested)
                     {
-                        // Si tu SimConnectManager expone ReceiveMessage, mantenemos el loop
                         sim.ReceiveMessage();
                         await Task.Delay(100, cts.Token);
                     }
@@ -93,13 +91,9 @@ namespace SharedCockpitClient.Network
                 catch (TaskCanceledException) { }
             });
 
-            // Bucle de prueba manual
             RunManualTestLoop();
         }
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // MODO MANUAL (LAB)
-        // ─────────────────────────────────────────────────────────────────────────────
         private void RunManualTestLoop()
         {
             while (true)
@@ -176,9 +170,6 @@ namespace SharedCockpitClient.Network
             }
         }
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // CONFIGURACIÓN
-        // ─────────────────────────────────────────────────────────────────────────────
         private void ConfigureMode()
         {
             Console.WriteLine("Selecciona modo: 1) Host  2) Cliente");
@@ -199,22 +190,13 @@ namespace SharedCockpitClient.Network
                 Console.WriteLine($"🚀 Cabina '{name}' iniciada en ws://{localIp}:8081 ({(pub ? "pública" : "privada")})");
 
                 hostServer = new WebSocketHost(8081);
-                hostServer.OnClientConnected += id =>
-                {
-                    Logger.Info($"✅ Cliente conectado ({id})");
-                    UpdatePeerConnection(true);
-                };
-                hostServer.OnClientDisconnected += id =>
-                {
-                    UpdatePeerConnection(hostServer.HasClients);
-                };
+                hostServer.OnClientConnected += id => Logger.Info($"✅ Cliente conectado ({id})");
                 hostServer.OnMessage += OnWebSocketMessage;
                 hostServer.Start();
             }
             else
             {
                 Console.WriteLine("👂 Escuchando broadcasts LAN (simplificado)...");
-                // Simplificado: seteamos una IP manual (ajustá si querés)
                 var ip = "192.168.58.117";
                 webSocketUrl = $"ws://{ip}:8081";
             }
@@ -232,22 +214,10 @@ namespace SharedCockpitClient.Network
             if (isHost) return;
 
             ws = new WebSocketManager(webSocketUrl, sim);
-            ws.OnOpen += () =>
-            {
-                Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
-                UpdatePeerConnection(true);
-            };
+            ws.OnOpen += () => Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
             ws.OnMessage += OnWebSocketMessage;
-            ws.OnError += msg =>
-            {
-                Logger.Warn($"Error WS: {msg}");
-                UpdatePeerConnection(false);
-            };
-            ws.OnClose += () =>
-            {
-                Logger.Warn("Conexión WS cerrada.");
-                UpdatePeerConnection(false);
-            };
+            ws.OnError += msg => Logger.Warn($"Error WS: {msg}");
+            ws.OnClose += () => Logger.Warn("Conexión WS cerrada.");
             ws.Connect();
         }
 
@@ -261,9 +231,6 @@ namespace SharedCockpitClient.Network
             };
         }
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // RECEPCIÓN Y ENVÍO
-        // ─────────────────────────────────────────────────────────────────────────────
         private void OnWebSocketMessage(string message)
         {
             if (string.IsNullOrWhiteSpace(message)) return;
@@ -277,33 +244,38 @@ namespace SharedCockpitClient.Network
                 using var doc = JsonDocument.Parse(message);
                 var root = doc.RootElement;
 
-                if (!root.TryGetProperty("type", out var typeProp))
-                    return;
-
+                if (!root.TryGetProperty("type", out var typeProp)) return;
                 var type = typeProp.GetString();
 
-                // Cambios puntuales: aircraft_state
+                string? remoteSource = null;
+                if (root.TryGetProperty("source", out var srcProp))
+                    remoteSource = srcProp.GetString();
+
+                if (!string.IsNullOrWhiteSpace(remoteSource) &&
+                    string.Equals(remoteSource, sourceTag, StringComparison.Ordinal))
+                {
+                    return; // mensaje originado por nosotros
+                }
+
                 if (type == "aircraft_state" &&
                     root.TryGetProperty("variable", out var v) &&
                     root.TryGetProperty("value", out var val))
                 {
                     var variable = v.GetString();
-                    if (string.IsNullOrEmpty(variable)) return;
+                    if (!string.IsNullOrEmpty(variable))
+                    {
+                        // Supresión por variable (1s) para cubrir animaciones async
+                        _suppressUntilByVar[variable] = DateTime.UtcNow.AddMilliseconds(1000);
 
-                    var source = root.TryGetProperty("source", out var sourceProp)
-                        ? sourceProp.GetString()
-                        : null;
-
-                    if (!string.IsNullOrWhiteSpace(source) && string.Equals(source, sourceTag, StringComparison.Ordinal))
-                        return;
-
-                    aircraftState.ApplyRemoteChange(variable, val);
-                    var formattedValue = val.ValueKind == JsonValueKind.Undefined ? "(undefined)" : val.ToString();
-                    Logger.Info($"[RemoteChange] {variable} = {formattedValue} (desde {source ?? "desconocido"})");
+                        WithOutboundSuppressed(() =>
+                        {
+                            aircraftState.ApplyRemoteChange(variable, val);
+                            Logger.Info($"[RemoteChange] {variable} = {FormatValue(val)} (desde {remoteSource ?? "desconocido"})");
+                        });
+                    }
                     return;
                 }
 
-                // Actualización de snapshot (plano): sync-update
                 if (type == "sync-update" && root.TryGetProperty("changes", out var changes))
                 {
                     var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
@@ -318,11 +290,18 @@ namespace SharedCockpitClient.Network
                             _ => prop.Value.ToString()
                         };
                         dict[prop.Name] = boxed;
+
+                        // Supresión por variable para todas las incluidas en el snapshot
+                        _suppressUntilByVar[prop.Name] = DateTime.UtcNow.AddMilliseconds(1000);
                     }
 
-                    // Mapear diccionario plano -> snapshot y aplicarlo
                     var incoming = BuildSnapshotFromFlat(dict);
-                    sim.InjectSnapshot(incoming);
+
+                    WithOutboundSuppressed(() =>
+                    {
+                        sim.InjectSnapshot(incoming);
+                        Logger.Info($"[RemoteSnapshot] {dict.Count} variables aplicadas (desde {remoteSource ?? "desconocido"})");
+                    });
                 }
             }
             catch (Exception ex)
@@ -335,12 +314,46 @@ namespace SharedCockpitClient.Network
         {
             lock (snapshotLock)
             {
-                latestSnapshot = snap?.Clone() ?? snap;
+                pendingSnapshot = snap?.Clone() ?? snap;
+                hasPendingSnapshot = pendingSnapshot is not null;
             }
         }
 
         private void OnLocalStateChanged(string variable, object value)
         {
+            // Si el cambio proviene de una aplicación REMOTA (bloque síncrono)
+            if (Volatile.Read(ref _suppressOutbound) > 0) return;
+
+            // Si la variable está en supresión temporal (por animación async)
+            if (_suppressUntilByVar.TryGetValue(variable, out var until) && until > DateTime.UtcNow)
+            {
+                // Logger.Info($"[LocalChangeSuppressed] {variable} (animación remota)");
+                return;
+            }
+
+            // Filtro EPS para numéricos: no emitir cambios insignificantes
+            if (value is double d)
+            {
+                var last = _lastSentNumeric.GetOrAdd(variable, double.NaN);
+                if (!double.IsNaN(last) && Math.Abs(d - last) < EPS_NUM)
+                    return;
+                _lastSentNumeric[variable] = d;
+            }
+            else if (value is float f)
+            {
+                var d2 = (double)f;
+                var last = _lastSentNumeric.GetOrAdd(variable, double.NaN);
+                if (!double.IsNaN(last) && Math.Abs(d2 - last) < EPS_NUM)
+                    return;
+                _lastSentNumeric[variable] = d2;
+            }
+            else if (value is bool b)
+            {
+                if (_lastSentBool.TryGetValue(variable, out var lastB) && lastB == b)
+                    return;
+                _lastSentBool[variable] = b;
+            }
+
             try
             {
                 var payload = new
@@ -352,15 +365,16 @@ namespace SharedCockpitClient.Network
                     timestamp = DateTime.UtcNow.ToString("o")
                 };
                 var json = JsonSerializer.Serialize(payload, jsonOptions);
-                if (isHost)
+
+                if (isHost && hostServer != null)
                 {
-                    hostServer?.Broadcast(json);
-                    Logger.Info($"[Broadcast] {variable} = {FormatValue(value)}");
+                    hostServer.Broadcast(json);
+                    Logger.Info($"[Broadcast] {FormatVar(variable)} = {FormatValue(value)}");
                 }
-                else
+                else if (ws != null)
                 {
-                    ws?.Send(json);
-                    Logger.Info($"[Send] {variable} = {FormatValue(value)}");
+                    ws.Send(json);
+                    Logger.Info($"[Send] {FormatVar(variable)} = {FormatValue(value)}");
                 }
             }
             catch (Exception ex)
@@ -369,163 +383,87 @@ namespace SharedCockpitClient.Network
             }
         }
 
-        private static string FormatValue(object value)
-        {
-            return value switch
-            {
-                null => "<null>",
-                JsonElement jsonElement => jsonElement.ValueKind == JsonValueKind.Undefined ? "(undefined)" : jsonElement.ToString(),
-                bool b => b ? "true" : "false",
-                double d => d.ToString(CultureInfo.InvariantCulture),
-                float f => f.ToString(CultureInfo.InvariantCulture),
-                IFormattable formattable => formattable.ToString(null, CultureInfo.InvariantCulture),
-                _ => value.ToString() ?? string.Empty
-            };
-        }
-
         private void StartSynchronizationLoop()
         {
             if (syncTimer != null) return;
 
-            syncTimer = new System.Threading.Timer(_ => ContinuousSyncTick(), null, TimeSpan.Zero, continuousSyncInterval);
-        }
-
-        private void ContinuousSyncTick()
-        {
-            try
+            syncTimer = new System.Threading.Timer(_ =>
             {
-                if (!IsPeerConnected())
+                try
                 {
-                    return;
-                }
-
-                SimStateSnapshot? snapshot;
-                SimStateSnapshot? lastSnapshot;
-                lock (snapshotLock)
-                {
-                    snapshot = latestSnapshot?.Clone() ?? latestSnapshot;
-                    lastSnapshot = lastSentSnapshot;
-                }
-
-                if (snapshot == null)
-                    return;
-
-                var shouldSend = lastSnapshot is null || snapshot.HasMeaningfulDifference(lastSnapshot);
-                if (!shouldSend)
-                    return;
-
-                var flat = FlattenSnapshot(snapshot);
-                if (flat.Count == 0)
-                {
+                    SimStateSnapshot? snapshot;
                     lock (snapshotLock)
                     {
-                        lastSentSnapshot = snapshot.Clone();
+                        if (!hasPendingSnapshot || pendingSnapshot == null) return;
+                        snapshot = pendingSnapshot;
+                        hasPendingSnapshot = false;
+                        pendingSnapshot = null;
                     }
-                    return;
+
+                    var flat = FlattenSnapshot(snapshot);
+
+                    var json = JsonSerializer.Serialize(new
+                    {
+                        type = "sync-update",
+                        changes = flat,
+                        source = sourceTag,
+                        timestamp = DateTime.UtcNow.ToString("o")
+                    }, jsonOptions);
+
+                    if (isHost) hostServer?.Broadcast(json);
+                    else ws?.Send(json);
+
+                    // Logger.Info($"[ContinuousSync] Snapshot enviado ({flat.Count} variables)");
                 }
-
-                var json = JsonSerializer.Serialize(new
+                catch (Exception ex)
                 {
-                    type = "sync-update",
-                    changes = flat
-                }, jsonOptions);
-
-                if (isHost)
-                    hostServer?.Broadcast(json);
-                else
-                    ws?.Send(json);
-
-                Logger.Info($"[ContinuousSync] Snapshot enviado ({flat.Count} variables)");
-
-                lock (snapshotLock)
-                {
-                    lastSentSnapshot = snapshot.Clone();
+                    Logger.Warn($"Error en loop de sync: {ex.Message}");
                 }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"Error en loop de sync: {ex.Message}");
-            }
+            },
+            null,
+            TimeSpan.Zero,
+            TimeSpan.FromMilliseconds(300));
         }
 
-        private bool IsPeerConnected()
-        {
-            lock (connectionLock)
-            {
-                return isPeerConnected;
-            }
-        }
-
-        private void UpdatePeerConnection(bool connected)
-        {
-            lock (connectionLock)
-            {
-                if (connected)
-                {
-                    isPeerConnected = true;
-                    wasEverConnected = true;
-                    syncPauseLogged = false;
-                    return;
-                }
-
-                if (isPeerConnected || (wasEverConnected && !syncPauseLogged))
-                {
-                    Logger.Warn("[SyncPaused] Conexión perdida. Esperando reconexión...");
-                    syncPauseLogged = true;
-                }
-
-                isPeerConnected = false;
-            }
-
-            lock (snapshotLock)
-            {
-                lastSentSnapshot = null;
-            }
-        }
-
-        // Pasar el snapshot (con grupos) a un diccionario plano
         private static Dictionary<string, object?> FlattenSnapshot(SimStateSnapshot snap)
         {
             var flat = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
-            // ControlsStruct (struct no-nullable)
             if (!snap.Controls.Equals(default(ControlsStruct)))
             {
                 var c = snap.Controls;
-                flat["throttle"] = c.Throttle;
-                flat["flaps"] = c.Flaps;
-                flat["gearDown"] = c.GearDown;
-                flat["parkingBrake"] = c.ParkingBrake;
+                flat["Throttle"] = c.Throttle;
+                flat["Flaps"] = c.Flaps;
+                flat["GearDown"] = c.GearDown;
+                flat["ParkingBrake"] = c.ParkingBrake;
             }
 
-            // SystemsStruct (struct no-nullable)
             if (!snap.Systems.Equals(default(SystemsStruct)))
             {
                 var s = snap.Systems;
-                flat["lightsOn"] = s.LightsOn;
-                flat["doorOpen"] = s.DoorOpen;
-                flat["avionicsOn"] = s.AvionicsOn;
+                flat["LightsOn"] = s.LightsOn;
+                flat["DoorOpen"] = s.DoorOpen;
+                flat["AvionicsOn"] = s.AvionicsOn;
             }
 
             return flat;
         }
 
-        // Construye un snapshot desde un diccionario plano "flat"
         private static SimStateSnapshot BuildSnapshotFromFlat(Dictionary<string, object?> flat)
         {
             var controls = new ControlsStruct
             {
-                Throttle = GetDouble(flat, "throttle"),
-                Flaps = GetDouble(flat, "flaps"),
-                GearDown = GetBool(flat, "gearDown"),
-                ParkingBrake = GetBool(flat, "parkingBrake")
+                Throttle = GetDouble(flat, "Throttle"),
+                Flaps = GetDouble(flat, "Flaps"),
+                GearDown = GetBool(flat, "GearDown"),
+                ParkingBrake = GetBool(flat, "ParkingBrake")
             };
 
             var systems = new SystemsStruct
             {
-                LightsOn = GetBool(flat, "lightsOn"),
-                DoorOpen = GetBool(flat, "doorOpen"),
-                AvionicsOn = GetBool(flat, "avionicsOn")
+                LightsOn = GetBool(flat, "LightsOn"),
+                DoorOpen = GetBool(flat, "DoorOpen"),
+                AvionicsOn = GetBool(flat, "AvionicsOn")
             };
 
             return new SimStateSnapshot
@@ -559,13 +497,30 @@ namespace SharedCockpitClient.Network
             return fallback;
         }
 
-        // ─────────────────────────────────────────────────────────────────────────────
-        // SHUTDOWN
-        // ─────────────────────────────────────────────────────────────────────────────
+        private static string FormatValue(object? value)
+        {
+            if (value is null) return "null";
+            return value switch
+            {
+                bool b => b ? "true" : "false",
+                double d => d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                float f => f.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
+                _ => value.ToString() ?? "?"
+            };
+        }
+
+        private static string FormatVar(string v) => v ?? "?";
+
+        private void WithOutboundSuppressed(Action action)
+        {
+            Interlocked.Increment(ref _suppressOutbound);
+            try { action(); }
+            finally { Interlocked.Decrement(ref _suppressOutbound); }
+        }
+
         private void Shutdown()
         {
             syncTimer?.Dispose();
-            UpdatePeerConnection(false);
             try { ws?.Close(); } catch { }
             try { hostServer?.Stop(); } catch { }
             try { sim.Dispose(); } catch { }
