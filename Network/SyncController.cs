@@ -1,226 +1,271 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SharedCockpitClient.FlightData;
+using SharedCockpitClient.Walkaround;
 
 namespace SharedCockpitClient.Network
 {
-    /// <summary>
-    /// Abstracción mínima del bus de red. Adaptado al administrador WebSocket del proyecto.
-    /// </summary>
     public interface INetworkBus
     {
         Task SendAsync(string json);
-        event Action<string>? OnMessage; // JSON entrante
+        event Action<string>? OnMessage;
     }
 
-    /// <summary>
-    /// Controla sincronización: anti-eco, idempotencia, LWW y delega animaciones y estado.
-    /// </summary>
     public sealed class SyncController : IDisposable
     {
-        private readonly INetworkBus bus;
-        private readonly Guid localInstanceId = Guid.NewGuid();
-        private int localSequence = 0;
-        private readonly ConcurrentDictionary<string, int> lastSeqByOrigin = new();
+        private readonly INetworkBus _bus;
+        private readonly AircraftStateManager? _aircraftState;
+        private readonly SimConnectManager? _sim;
+        private WalkaroundSync? _walkaround;
 
-        private readonly FlapAnimator flapsAnimator = new(stepMs: 50, stepValue: 0.5);
-        private volatile bool gearDown;
+        private readonly Guid _localInstanceId = Guid.NewGuid();
+        private int _localSequence;
+        private readonly ConcurrentDictionary<Guid, int> _lastSeqByOrigin = new();
+        private readonly ConcurrentDictionary<string, long> _suppressedProps = new(StringComparer.OrdinalIgnoreCase);
+        private readonly ConcurrentDictionary<string, ThrottleState> _throttle = new(StringComparer.OrdinalIgnoreCase);
+        private long _serverTimeBias;
 
-        private readonly object sendLock = new();
-        private DateTime lastSendUtc = DateTime.MinValue;
-        private double lastSentFlapsTarget = double.NaN;
-        private readonly TimeSpan minSendInterval = TimeSpan.FromMilliseconds(50);
+        public Guid LocalInstanceId => _localInstanceId;
 
-        // 🧩 Integración con el estado global del avión
-        private readonly AircraftStateManager? aircraftState;
-
-        public Guid LocalInstanceId => localInstanceId;
-
-        /// <summary>
-        /// Crea un nuevo controlador de sincronización.
-        /// </summary>
-        public SyncController(INetworkBus bus, AircraftStateManager? stateManager = null)
+        public SyncController(INetworkBus bus, AircraftStateManager? stateManager = null, SimConnectManager? simManager = null, WalkaroundSync? walkaroundSync = null)
         {
-            this.bus = bus ?? throw new ArgumentNullException(nameof(bus));
-            this.bus.OnMessage += HandleIncomingJson;
-            this.aircraftState = stateManager;
+            _bus = bus ?? throw new ArgumentNullException(nameof(bus));
+            _aircraftState = stateManager;
+            _sim = simManager;
+            _walkaround = walkaroundSync;
 
-            // Si existe un manager de estado, suscribirse a sus cambios locales.
-            if (aircraftState != null)
+            _bus.OnMessage += HandleIncomingJson;
+
+            if (_aircraftState != null)
             {
-                aircraftState.OnPropertyChanged += async (prop, value) =>
+                _aircraftState.OnPropertyChanged += async (prop, value) =>
                 {
-                    try
-                    {
-                        var jsonVal = JsonSerializer.SerializeToElement(value);
-                        var msg = NewMessage(prop, jsonVal);
-                        Console.WriteLine($"[Send] {prop} = {value} (seq={msg.sequence}, origin={msg.originId})");
-                        await SendAsync(msg).ConfigureAwait(false);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[Sync] Error enviando {prop}: {ex.Message}");
-                    }
+                    if (ShouldSuppress(prop))
+                        return;
+
+                    var descriptor = SimDataDefinition.TryGetVar(prop, out var varDescriptor) ? varDescriptor : null;
+                    if (!ShouldSendNow(prop, value, descriptor))
+                        return;
+
+                    var message = NewStateMessage(prop, value);
+                    Console.WriteLine($"[Send] {prop} = {value} seq={message.sequence} origin={message.originId}");
+                    await SendAsync(message).ConfigureAwait(false);
                 };
             }
         }
 
+        public void AttachWalkaround(WalkaroundSync walkaround)
+        {
+            _walkaround = walkaround ?? throw new ArgumentNullException(nameof(walkaround));
+        }
+
         public void Dispose()
         {
-            bus.OnMessage -= HandleIncomingJson;
-            flapsAnimator.Dispose();
+            _bus.OnMessage -= HandleIncomingJson;
         }
 
-        #region ======== Entradas locales ========
-
-        public async Task SetFlapsLocalAsync(double target)
+        private bool ShouldSuppress(string prop)
         {
-            var stepped = Math.Round(target * 2.0, MidpointRounding.AwayFromZero) / 2.0;
-            lock (sendLock)
+            if (_suppressedProps.TryRemove(prop, out _))
+            {
+                return true;
+            }
+
+            return false;
+        }
+
+        private bool ShouldSendNow(string prop, object? value, SimVarDescriptor? descriptor)
+        {
+            var throttle = _throttle.GetOrAdd(prop, _ => new ThrottleState());
+            lock (throttle)
             {
                 var now = DateTime.UtcNow;
-                if (now - lastSendUtc < minSendInterval && Math.Abs(stepped - lastSentFlapsTarget) < 0.001)
-                    return;
-                lastSendUtc = now;
-                lastSentFlapsTarget = stepped;
-            }
+                var minInterval = descriptor != null && descriptor.Category.Equals("Controls", StringComparison.OrdinalIgnoreCase)
+                    ? TimeSpan.FromMilliseconds(50)
+                    : TimeSpan.FromMilliseconds(120);
 
-            flapsAnimator.AnimateTo(stepped);
-            aircraftState?.Set("Flaps", stepped);
-
-            var msg = NewMessage("Flaps", JsonSerializer.SerializeToElement(stepped));
-            Console.WriteLine($"[Send] Flaps = {stepped} (seq={msg.sequence}, origin={msg.originId})");
-            await SendAsync(msg).ConfigureAwait(false);
-        }
-
-        public async Task ToggleGearLocalAsync()
-        {
-            gearDown = !gearDown;
-            Console.WriteLine($"[AnimStart] GearDown -> {gearDown}");
-            Console.WriteLine("[AnimEnd] GearDown completado");
-            aircraftState?.Set("GearDown", gearDown);
-
-            var msg = NewMessage("GearDown", JsonSerializer.SerializeToElement(gearDown));
-            Console.WriteLine($"[Send] GearDown = {gearDown} (seq={msg.sequence}, origin={msg.originId})");
-            await SendAsync(msg).ConfigureAwait(false);
-        }
-
-        #endregion
-
-        #region ======== Mensajes entrantes ========
-
-        private void HandleIncomingJson(string json)
-        {
-            try
-            {
-                using var doc = JsonDocument.Parse(json);
-                var root = doc.RootElement;
-                if (!root.TryGetProperty("type", out var t) || t.GetString() != "stateChange")
-                    return;
-
-                var msg = JsonSerializer.Deserialize<StateChangeMessage>(json);
-                if (msg == null)
-                    return;
-
-                if (!Guid.TryParse(msg.originId, out var originGuid))
-                    return;
-
-                if (originGuid == localInstanceId)
-                    return; // Anti-eco
-
-                var lastSeen = lastSeqByOrigin.GetOrAdd(msg.originId, -1);
-                if (msg.sequence <= lastSeen)
-                    return;
-
-                lastSeqByOrigin[msg.originId] = msg.sequence;
-                ApplyRemoteState(msg);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Sync] Error parseando mensaje: {ex.Message}");
-            }
-        }
-
-        private void ApplyRemoteState(StateChangeMessage msg)
-        {
-            try
-            {
-                switch (msg.prop)
+                if (now - throttle.LastSentUtc < minInterval)
                 {
-                    case "Flaps":
-                        if (msg.value.ValueKind == JsonValueKind.Number && msg.value.TryGetDouble(out var target))
+                    if (descriptor?.MinDelta is double minDelta && TryAsDouble(value, out var newVal) && TryAsDouble(throttle.LastValue, out var lastVal))
+                    {
+                        if (Math.Abs(newVal - lastVal) < minDelta)
                         {
-                            Console.WriteLine($"[RemoteChange] Flaps = {target} (from {msg.originId}, seq={msg.sequence})");
-                            flapsAnimator.AnimateTo(target);
-                            aircraftState?.Set("Flaps", target);
+                            return false;
                         }
-                        break;
-
-                    case "GearDown":
-                        if (msg.value.ValueKind is JsonValueKind.True or JsonValueKind.False)
-                        {
-                            var newVal = msg.value.GetBoolean();
-                            gearDown = newVal;
-                            Console.WriteLine($"[RemoteChange] GearDown = {gearDown} (from {msg.originId}, seq={msg.sequence})");
-                            aircraftState?.Set("GearDown", gearDown);
-                        }
-                        break;
-
-                    default:
-                        Console.WriteLine($"[RemoteChange] {msg.prop} = {msg.value} (from {msg.originId}, seq={msg.sequence})");
-                        ApplyGenericRemote(msg);
-                        break;
+                    }
+                    else
+                    {
+                        return false;
+                    }
                 }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Sync] Error aplicando estado remoto: {ex.Message}");
+
+                throttle.LastSentUtc = now;
+                throttle.LastValue = value;
+                return true;
             }
         }
 
-        // Aplica estados remotos genéricos (luces, motor, etc.)
-        private void ApplyGenericRemote(StateChangeMessage msg)
+        private StateChangeMessage NewStateMessage(string prop, object? value)
         {
-            if (aircraftState == null) return;
-
-            object? val = msg.value.ValueKind switch
-            {
-                JsonValueKind.Number => msg.value.GetDouble(),
-                JsonValueKind.True => true,
-                JsonValueKind.False => false,
-                JsonValueKind.String => msg.value.GetString(),
-                _ => msg.value.ToString()
-            };
-
-            aircraftState.Set(msg.prop, val);
-        }
-
-        #endregion
-
-        #region ======== Utilitarios ========
-
-        private StateChangeMessage NewMessage(string prop, JsonElement value)
-        {
-            var seq = Interlocked.Increment(ref localSequence);
+            var seq = Interlocked.Increment(ref _localSequence);
+            var json = JsonSerializer.SerializeToElement(value, value?.GetType() ?? typeof(object));
             return new StateChangeMessage
             {
                 prop = prop,
-                value = value,
-                originId = localInstanceId.ToString(),
+                value = json,
+                originId = _localInstanceId,
                 sequence = seq,
-                serverTime = 0
+                serverTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()
             };
         }
 
         private Task SendAsync(StateChangeMessage msg)
         {
             var json = JsonSerializer.Serialize(msg);
-            return bus.SendAsync(json);
+            return _bus.SendAsync(json);
         }
 
-        #endregion
+        private void HandleIncomingJson(string json)
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(json);
+                var type = doc.RootElement.GetProperty("type").GetString();
+                switch (type)
+                {
+                    case SyncMessageTypes.StateChange:
+                        var stateMsg = JsonSerializer.Deserialize<StateChangeMessage>(json);
+                        if (stateMsg != null)
+                        {
+                            HandleStateChange(stateMsg);
+                        }
+                        break;
+                    case SyncMessageTypes.AvatarPose:
+                        var avatarMsg = JsonSerializer.Deserialize<AvatarPoseMessage>(json);
+                        if (avatarMsg != null)
+                        {
+                            _walkaround?.ApplyRemotePose(avatarMsg);
+                        }
+                        break;
+                    case SyncMessageTypes.Session:
+                        var session = JsonSerializer.Deserialize<SessionMessage>(json);
+                        if (session != null)
+                        {
+                            _walkaround?.ApplySession(session);
+                        }
+                        break;
+                    case SyncMessageTypes.Snapshot:
+                        var snapshot = JsonSerializer.Deserialize<SnapshotMessage>(json);
+                        if (snapshot != null)
+                        {
+                            HandleSnapshotMessage(snapshot);
+                        }
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Sync] Error procesando mensaje: {ex.Message}");
+            }
+        }
+
+        private void HandleStateChange(StateChangeMessage msg)
+        {
+            if (msg.originId == _localInstanceId)
+                return;
+
+            var lastSeen = _lastSeqByOrigin.GetOrAdd(msg.originId, -1);
+            if (msg.sequence <= lastSeen)
+                return;
+
+            _lastSeqByOrigin[msg.originId] = msg.sequence;
+            _serverTimeBias = msg.serverTime - DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
+            var value = ConvertJsonValue(msg.value);
+            if (value is Dictionary<string, object?> opDict && opDict.TryGetValue("op", out var op) && string.Equals(Convert.ToString(op), "toggle", StringComparison.OrdinalIgnoreCase))
+            {
+                var current = _aircraftState?.Get(msg.prop);
+                value = current is bool b ? !b : true;
+            }
+            Console.WriteLine($"[RemoteChange] {msg.prop} = {value} from={msg.originId} seq={msg.sequence}");
+
+            _suppressedProps[msg.prop] = msg.sequence;
+
+            if (_sim != null)
+            {
+                _ = _sim.ApplyRemoteChangeAsync(msg.prop, value, CancellationToken.None);
+            }
+            else
+            {
+                _aircraftState?.Set(msg.prop, value);
+            }
+        }
+
+        private void HandleSnapshotMessage(SnapshotMessage msg)
+        {
+            if (msg.originId == _localInstanceId)
+                return;
+
+            foreach (var kv in msg.state)
+            {
+                _suppressedProps[kv.Key] = msg.serverTime;
+                _aircraftState?.Set(kv.Key, kv.Value);
+            }
+        }
+
+        private static object? ConvertJsonValue(JsonElement element)
+        {
+            return element.ValueKind switch
+            {
+                JsonValueKind.Null => null,
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+                JsonValueKind.String => element.GetString(),
+                JsonValueKind.Object => JsonSerializer.Deserialize<Dictionary<string, object?>>(element.GetRawText()),
+                _ => element.GetRawText()
+            };
+        }
+
+        private static bool TryAsDouble(object? value, out double result)
+        {
+            switch (value)
+            {
+                case null:
+                    result = 0;
+                    return false;
+                case double d:
+                    result = d;
+                    return true;
+                case float f:
+                    result = f;
+                    return true;
+                case int i:
+                    result = i;
+                    return true;
+                case long l:
+                    result = l;
+                    return true;
+                case decimal m:
+                    result = (double)m;
+                    return true;
+                case string s when double.TryParse(s, out var parsed):
+                    result = parsed;
+                    return true;
+                default:
+                    result = 0;
+                    return false;
+            }
+        }
+
+        private sealed class ThrottleState
+        {
+            public DateTime LastSentUtc { get; set; } = DateTime.MinValue;
+            public object? LastValue { get; set; }
+        }
     }
 }

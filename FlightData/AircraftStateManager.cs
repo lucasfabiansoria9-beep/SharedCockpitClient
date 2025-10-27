@@ -84,6 +84,7 @@ namespace SharedCockpitClient.FlightData
                     {
                         _state[kvp.Key] = kvp.Value;
                         Console.WriteLine($"[RemoteChange] {kvp.Key} = {kvp.Value}");
+                        OnPropertyChanged?.Invoke(kvp.Key, kvp.Value);
                     }
                 }
 

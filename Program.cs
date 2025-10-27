@@ -1,9 +1,12 @@
 using System;
+using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using SharedCockpitClient.Network;
 using SharedCockpitClient.FlightData;
+using SharedCockpitClient.Network;
+using SharedCockpitClient.Persistence;
+using SharedCockpitClient.Walkaround;
 
 namespace SharedCockpitClient
 {
@@ -39,7 +42,7 @@ namespace SharedCockpitClient
 
             Console.WriteLine("──────────────────────────────────────────────────────────────");
             Console.WriteLine("✈️  SharedCockpitClient iniciado");
-            Console.WriteLine($"[Boot] Versión: 1.0 | LabMode={GlobalFlags.IsLabMode} | Role={(isHost ? "host" : "client")} | Peer={peer}");
+            Console.WriteLine($"[Boot] Versión: 5.0 | LabMode={GlobalFlags.IsLabMode} | Role={(isHost ? "host" : "client")} | Peer={peer}");
             Console.WriteLine("──────────────────────────────────────────────────────────────\n");
 
             using var cts = new CancellationTokenSource();
@@ -49,38 +52,65 @@ namespace SharedCockpitClient
                 cts.Cancel();
             };
 
-            // 🔌 Inicializa la conexión de red
+            var store = new SnapshotStore();
+            var aircraftState = new AircraftStateManager();
+            try
+            {
+                var restored = await store.LoadAsync(cts.Token).ConfigureAwait(false);
+                if (restored.Count > 0)
+                {
+                    aircraftState.ApplySnapshot(new Dictionary<string, object?>(restored));
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Boot] ⚠️ No se pudo cargar snapshot previo: {ex.Message}");
+            }
+
+            var simManager = new SimConnectManager(aircraftState);
+            simManager.OnSnapshot += (snapshot, isDiff) =>
+            {
+                if (!isDiff)
+                {
+                    _ = store.SaveAsync(snapshot.ToFlatDictionary(), CancellationToken.None);
+                }
+            };
+            simManager.Start();
+
             using var ws = new WebSocketManager(isHost, peerUri);
             await ws.StartAsync(cts.Token).ConfigureAwait(false);
 
-            // 🧠 Inicializa el estado del avión
-            var aircraftState = new AircraftStateManager();
+            using var sync = new SyncController(ws, aircraftState, simManager);
+            var walkaroundSync = new WalkaroundSync(ws, sync.LocalInstanceId);
+            sync.AttachWalkaround(walkaroundSync);
 
-            // 🔄 Crea el controlador de sincronización con referencia al estado
-            using var sync = new SyncController(ws, aircraftState);
             Console.WriteLine($"[Boot] LocalInstanceId = {sync.LocalInstanceId}");
 
-            // 🧪 Loop de laboratorio (modo offline)
             if (GlobalFlags.IsLabMode)
             {
-                RunLabLoop(sync, aircraftState, cts.Token);
+                RunLabLoop(sync, aircraftState, walkaroundSync, cts.Token);
             }
             else
             {
-                Console.WriteLine("[Boot] ℹ️ Modo estándar aún no implementado para Fase 4. Usando loop de laboratorio.");
-                RunLabLoop(sync, aircraftState, cts.Token);
+                Console.WriteLine("[Boot] ℹ️ Integración con MSFS real requerirá ejecutar junto al simulador.");
+                RunLabLoop(sync, aircraftState, walkaroundSync, cts.Token);
+            }
+
+            try
+            {
+                await store.SaveAsync(aircraftState.GetSnapshot(), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Boot] ⚠️ Error guardando snapshot final: {ex.Message}");
             }
 
             Console.WriteLine("\n[Boot] 🚪 Aplicación finalizada correctamente.");
         }
 
-        /// <summary>
-        /// Loop interactivo de laboratorio.
-        /// Permite probar flaps, tren y otras propiedades manualmente.
-        /// </summary>
-        private static void RunLabLoop(SyncController sync, AircraftStateManager state, CancellationToken token)
+        private static void RunLabLoop(SyncController sync, AircraftStateManager state, WalkaroundSync walkaroundSync, CancellationToken token)
         {
-            Console.WriteLine("Lab Mode activo. Comandos: flaps <num>, gear, lights <on/off>, engine <on/off>, door <open/close>, state, exit");
+            Console.WriteLine("Lab Mode activo. Comandos: set <ruta> <valor>, toggle <ruta>, pose <lat> <lon> <alt> <hdg>, state, exit");
 
             while (!token.IsCancellationRequested)
             {
@@ -101,61 +131,75 @@ namespace SharedCockpitClient
 
                 switch (cmd)
                 {
-                    case "flaps":
-                        if (parts.Length >= 2 && double.TryParse(parts[1], out var target))
+                    case "set":
+                        if (parts.Length >= 3)
                         {
-                            _ = sync.SetFlapsLocalAsync(target);
+                            var path = parts[1];
+                            var raw = string.Join(' ', parts.Skip(2));
+                            if (double.TryParse(raw, out var dbl))
+                                state.Set(path, dbl);
+                            else if (bool.TryParse(raw, out var b))
+                                state.Set(path, b);
+                            else
+                                state.Set(path, raw);
                         }
                         else
                         {
-                            Console.WriteLine("Uso: flaps <valor>");
+                            Console.WriteLine("Uso: set <ruta> <valor>");
                         }
                         break;
 
-                    case "gear":
-                        _ = sync.ToggleGearLocalAsync();
-                        break;
-
-                    case "lights":
+                    case "toggle":
                         if (parts.Length >= 2)
                         {
-                            bool val = string.Equals(parts[1], "on", StringComparison.OrdinalIgnoreCase);
-                            state.Set("Lights", val);
+                            var path = parts[1];
+                            var current = state.Get(path);
+                            if (current is bool boolValue)
+                            {
+                                state.Set(path, !boolValue);
+                            }
+                            else
+                            {
+                                state.Set(path, true);
+                            }
                         }
                         else
                         {
-                            Console.WriteLine("Uso: lights on/off");
+                            Console.WriteLine("Uso: toggle <ruta>");
                         }
                         break;
 
-                    case "engine":
-                        if (parts.Length >= 2)
+                    case "pose":
+                        if (parts.Length >= 5)
                         {
-                            bool val = string.Equals(parts[1], "on", StringComparison.OrdinalIgnoreCase);
-                            state.Set("EngineOn", val);
+                            if (double.TryParse(parts[1], out var lat) &&
+                                double.TryParse(parts[2], out var lon) &&
+                                double.TryParse(parts[3], out var alt) &&
+                                double.TryParse(parts[4], out var hdg))
+                            {
+                                var pose = new AvatarPose
+                                {
+                                    lat = lat,
+                                    lon = lon,
+                                    alt = alt,
+                                    hdg = hdg,
+                                    pitch = 0,
+                                    bank = 0,
+                                    state = "walk"
+                                };
+                                _ = walkaroundSync.PublishPoseAsync(pose, token);
+                            }
                         }
                         else
                         {
-                            Console.WriteLine("Uso: engine on/off");
-                        }
-                        break;
-
-                    case "door":
-                        if (parts.Length >= 2)
-                        {
-                            bool val = string.Equals(parts[1], "open", StringComparison.OrdinalIgnoreCase);
-                            state.Set("DoorOpen", val);
-                        }
-                        else
-                        {
-                            Console.WriteLine("Uso: door open/close");
+                            Console.WriteLine("Uso: pose <lat> <lon> <alt> <hdg>");
                         }
                         break;
 
                     case "state":
                         var snapshot = state.GetSnapshot();
                         Console.WriteLine("📋 Estado actual del avión:");
-                        foreach (var kv in snapshot)
+                        foreach (var kv in snapshot.OrderBy(k => k.Key, StringComparer.OrdinalIgnoreCase))
                             Console.WriteLine($"  {kv.Key} = {kv.Value}");
                         break;
 
@@ -166,9 +210,6 @@ namespace SharedCockpitClient
             }
         }
 
-        /// <summary>
-        /// Devuelve el valor de un argumento CLI.
-        /// </summary>
         private static string? GetArgValue(string[] args, string key)
         {
             var index = Array.FindIndex(args, a => a.Equals(key, StringComparison.OrdinalIgnoreCase));

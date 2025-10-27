@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8" />
+    <title>SharedCockpit HUD</title>
+    <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+    <header>
+        <h1>SharedCockpit HUD</h1>
+        <span id="connection-status" class="status status-disconnected">Desconectado</span>
+    </header>
+    <nav>
+        <button data-tab="status" class="active">Estado</button>
+        <button data-tab="controls">Controles</button>
+        <button data-tab="walkaround">Walkaround</button>
+        <button data-tab="log">Log</button>
+    </nav>
+    <main>
+        <section id="tab-status" class="tab active">
+            <h2>Estado del avión</h2>
+            <pre id="state-output">Esperando datos...</pre>
+        </section>
+        <section id="tab-controls" class="tab">
+            <h2>Controles rápidos</h2>
+            <div class="grid">
+                <button class="action" data-prop="Systems.Autopilot.AP_MASTER" data-value="toggle">AP Master</button>
+                <button class="action" data-prop="Systems.Lights.Beacon" data-value="toggle">Beacon</button>
+                <button class="action" data-prop="Systems.Lights.Landing" data-value="toggle">Landing</button>
+                <button class="action" data-prop="Systems.Autopilot.ALT" data-value="12000">Alt 12000</button>
+                <button class="action" data-prop="Controls.Gear.Handle" data-value="toggle">Gear</button>
+            </div>
+        </section>
+        <section id="tab-walkaround" class="tab">
+            <h2>Walkaround</h2>
+            <label>
+                <input type="checkbox" id="walkaround-toggle" /> Activar modo Walkaround
+            </label>
+            <div class="pose">
+                <label>Latitud <input type="number" id="pose-lat" step="0.000001" /></label>
+                <label>Longitud <input type="number" id="pose-lon" step="0.000001" /></label>
+                <label>Altitud <input type="number" id="pose-alt" step="0.1" /></label>
+                <label>Heading <input type="number" id="pose-hdg" step="0.1" /></label>
+            </div>
+            <button id="send-pose">Enviar pose</button>
+        </section>
+        <section id="tab-log" class="tab">
+            <h2>Log de red</h2>
+            <ul id="log-list"></ul>
+        </section>
+    </main>
+    <script src="app.js"></script>
+</body>
+</html>

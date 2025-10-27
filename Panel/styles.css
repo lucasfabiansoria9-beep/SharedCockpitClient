@@ -1,0 +1,111 @@
+body {
+    font-family: 'Segoe UI', sans-serif;
+    background: #0b1621;
+    color: #e5f2ff;
+    margin: 0;
+    padding: 0;
+}
+
+header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 1.5rem;
+    background: #11293d;
+    border-bottom: 1px solid #1e3a56;
+}
+
+nav {
+    display: flex;
+    gap: 0.5rem;
+    padding: 0.5rem 1.5rem;
+    background: #102233;
+}
+
+nav button {
+    background: #1e3a56;
+    color: inherit;
+    border: none;
+    padding: 0.5rem 1rem;
+    cursor: pointer;
+    border-radius: 4px;
+}
+
+nav button.active {
+    background: #2f5175;
+}
+
+main {
+    padding: 1.5rem;
+}
+
+.tab {
+    display: none;
+}
+
+.tab.active {
+    display: block;
+}
+
+.status {
+    padding: 0.25rem 0.75rem;
+    border-radius: 999px;
+    font-size: 0.9rem;
+}
+
+.status-connected {
+    background: #2dce89;
+    color: #0b2d1f;
+}
+
+.status-disconnected {
+    background: #e74c3c;
+    color: #2a0c0c;
+}
+
+.grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+    gap: 0.75rem;
+}
+
+.action {
+    padding: 0.75rem;
+    background: #234567;
+    color: inherit;
+    border: none;
+    border-radius: 4px;
+    cursor: pointer;
+    transition: background 0.2s ease-in-out;
+}
+
+.action:hover {
+    background: #2f5f8a;
+}
+
+.pose {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+    gap: 0.5rem;
+    margin: 1rem 0;
+}
+
+.pose label {
+    display: flex;
+    flex-direction: column;
+    gap: 0.25rem;
+}
+
+#log-list {
+    list-style: none;
+    padding: 0;
+    margin: 0;
+    max-height: 300px;
+    overflow-y: auto;
+}
+
+#log-list li {
+    padding: 0.25rem 0;
+    border-bottom: 1px solid #1e3a56;
+    font-family: 'Consolas', monospace;
+}
