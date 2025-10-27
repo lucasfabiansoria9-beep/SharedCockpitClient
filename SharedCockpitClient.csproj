@@ -78,6 +78,29 @@
           Condition="'@(NativeSimConnect)' != '' and '$(PublishDir)' != ''" />
   </Target>
 
+
+  <Target Name="CopyMSFSSDKResources" BeforeTargets="BeforeBuild">
+    <ItemGroup>
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.h" />
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.lib" />
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.dll" />
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.xml" />
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.json" />
+      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.schema.json" />
+    </ItemGroup>
+
+    <Message Text="📦 Copiando recursos del SDK de MSFS 2024..." Importance="High" />
+    <Copy SourceFiles="@(SDKFiles)"
+          DestinationFolder="SDKResources\%(RecursiveDir)"
+          SkipUnchangedFiles="true"
+          Condition="Exists('C:\MSFS 2024 SDK')" />
+    <Message Text="✅ Recursos del SDK copiados a SDKResources." Importance="High" />
+  </Target>
+
+  <ItemGroup>
+    <EmbeddedResource Include="SDKResources\**\*" />
+  </ItemGroup>
+
   <!-- Abrir en VS, compilar Release y publicar a:
        E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish -->
 </Project>
