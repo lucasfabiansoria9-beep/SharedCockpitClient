@@ -1,531 +1,161 @@
 using System;
 using System.Collections.Concurrent;
-using System.Collections.Generic;
-using System.Linq;
-using System.Net;
-using System.Net.Sockets;
-using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using SharedCockpitClient.FlightData;
-using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
+    /// <summary>
+    /// Abstracción mínima del bus de red. Adaptado al administrador WebSocket del proyecto.
+    /// </summary>
+    public interface INetworkBus
+    {
+        Task SendAsync(string json);
+        event Action<string>? OnMessage; // JSON entrante
+    }
+
+    /// <summary>
+    /// Controla sincronización: anti-eco, idempotencia, LWW y delega animaciones.
+    /// </summary>
     public sealed class SyncController : IDisposable
     {
-        private readonly SimConnectManager sim;
-        private readonly AircraftStateManager aircraftState;
+        private readonly INetworkBus bus;
+        private readonly Guid localInstanceId = Guid.NewGuid();
+        private int localSequence = 0;
+        private readonly ConcurrentDictionary<string, int> lastSeqByOrigin = new();
 
-        private bool isHost = true;
-        private string webSocketUrl = string.Empty;
+        private readonly FlapAnimator flapsAnimator = new(stepMs: 50, stepValue: 0.5);
+        private volatile bool gearDown;
 
-        private WebSocketManager? ws;
-        private WebSocketHost? hostServer;
+        private readonly object sendLock = new();
+        private DateTime lastSendUtc = DateTime.MinValue;
+        private double lastSentFlapsTarget = double.NaN;
+        private readonly TimeSpan minSendInterval = TimeSpan.FromMilliseconds(50);
 
-        private CancellationTokenSource? loopToken;
-        private System.Threading.Timer? syncTimer;
+        public Guid LocalInstanceId => localInstanceId;
 
-        private readonly object snapshotLock = new();
-        private SimStateSnapshot? pendingSnapshot;
-        private bool hasPendingSnapshot;
-
-        private readonly string sourceTag = Guid.NewGuid().ToString();
-        private readonly JsonSerializerOptions jsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
-
-        // Anti-eco general (sincrónico inmediato)
-        private int _suppressOutbound;
-
-        // Anti-eco por variable: suprime emisiones de una variable hasta este instante (para cubrir animaciones async)
-        private readonly ConcurrentDictionary<string, DateTime> _suppressUntilByVar = new(StringComparer.OrdinalIgnoreCase);
-
-        // Para filtrar ruido: recordar último valor emitido por variable y aplicar EPS
-        private readonly ConcurrentDictionary<string, double> _lastSentNumeric = new(StringComparer.OrdinalIgnoreCase);
-        private readonly ConcurrentDictionary<string, bool> _lastSentBool = new(StringComparer.OrdinalIgnoreCase);
-
-        private const double EPS_NUM = 0.02; // umbral de cambio mínimo para emitir valores numéricos
-
-        public SyncController(SimConnectManager sim, AircraftStateManager aircraftState)
+        public SyncController(INetworkBus bus)
         {
-            this.sim = sim ?? throw new ArgumentNullException(nameof(sim));
-            this.aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
-
-            this.sim.OnSnapshot += OnLocalSnapshot;
-            this.aircraftState.OnStateChanged += OnLocalStateChanged;
+            this.bus = bus ?? throw new ArgumentNullException(nameof(bus));
+            this.bus.OnMessage += HandleIncomingJson;
         }
 
-        public async Task RunAsync()
+        public void Dispose()
         {
-            Console.OutputEncoding = Encoding.UTF8;
+            bus.OnMessage -= HandleIncomingJson;
+            flapsAnimator.Dispose();
+        }
 
-            ConfigureMode();
-            SetupWebSocket();
-            SetupShutdownHandlers();
-
-            try
+        public async Task SetFlapsLocalAsync(double target)
+        {
+            var stepped = Math.Round(target * 2.0, MidpointRounding.AwayFromZero) / 2.0;
+            lock (sendLock)
             {
-                var msfsRunning = System.Diagnostics.Process.GetProcessesByName("FlightSimulator").Any();
-                if (!msfsRunning) sim.EnableMockMode();
+                var now = DateTime.UtcNow;
+                if (now - lastSendUtc < minSendInterval && Math.Abs(stepped - lastSentFlapsTarget) < 0.001)
+                    return;
+                lastSendUtc = now;
+                lastSentFlapsTarget = stepped;
             }
-            catch { sim.EnableMockMode(); }
 
-            sim.Initialize(IntPtr.Zero);
-            StartSynchronizationLoop();
+            flapsAnimator.AnimateTo(stepped);
 
-            Logger.Info("Modo manual: comandos -> throttle 0.8 | flaps 15 | gear | brake | lights | door | avionics | exit");
-
-            using var cts = new CancellationTokenSource();
-            loopToken = cts;
-
-            _ = Task.Run(async () =>
-            {
-                try
-                {
-                    while (!cts.IsCancellationRequested)
-                    {
-                        sim.ReceiveMessage();
-                        await Task.Delay(100, cts.Token);
-                    }
-                }
-                catch (TaskCanceledException) { }
-            });
-
-            RunManualTestLoop();
+            var msg = NewMessage("Flaps", JsonSerializer.SerializeToElement(stepped));
+            Console.WriteLine($"[Send] Flaps = {stepped} (seq={msg.sequence}, origin={msg.originId})");
+            await SendAsync(msg).ConfigureAwait(false);
         }
 
-        private void RunManualTestLoop()
+        public async Task ToggleGearLocalAsync()
         {
-            while (true)
-            {
-                Console.Write("> ");
-                var input = Console.ReadLine()?.Trim();
-                if (string.IsNullOrEmpty(input)) continue;
-                if (input.Equals("exit", StringComparison.OrdinalIgnoreCase)) break;
+            gearDown = !gearDown;
+            Console.WriteLine($"[AnimStart] GearDown -> {gearDown}");
+            Console.WriteLine("[AnimEnd] GearDown completado");
 
-                var parts = input.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                var cmd = parts[0].ToLowerInvariant();
-                double numValue;
-                bool boolValue;
-
-                try
-                {
-                    switch (cmd)
-                    {
-                        case "throttle":
-                            if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out numValue))
-                                aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.Throttle),
-                                    JsonDocument.Parse(numValue.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement);
-                            else
-                                Logger.Warn("Uso: throttle <0..1>");
-                            break;
-
-                        case "flaps":
-                            if (parts.Length > 1 && double.TryParse(parts[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out numValue))
-                                aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.Flaps),
-                                    JsonDocument.Parse(numValue.ToString(System.Globalization.CultureInfo.InvariantCulture)).RootElement);
-                            else
-                                Logger.Warn("Uso: flaps <grados>");
-                            break;
-
-                        case "gear":
-                            boolValue = !aircraftState.GearDown;
-                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.GearDown),
-                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
-                            break;
-
-                        case "brake":
-                            boolValue = !aircraftState.ParkingBrake;
-                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.ParkingBrake),
-                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
-                            break;
-
-                        case "lights":
-                            boolValue = !aircraftState.LightsOn;
-                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.LightsOn),
-                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
-                            break;
-
-                        case "door":
-                            boolValue = !aircraftState.DoorOpen;
-                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.DoorOpen),
-                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
-                            break;
-
-                        case "avionics":
-                            boolValue = !aircraftState.AvionicsOn;
-                            aircraftState.ApplyRemoteChange(nameof(AircraftStateManager.AvionicsOn),
-                                JsonDocument.Parse(boolValue ? "true" : "false").RootElement);
-                            break;
-
-                        default:
-                            Logger.Warn("Comando inválido. Usa: throttle 0.8 | flaps 15 | gear | brake | lights | door | avionics | exit");
-                            break;
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"⚠️ Error ejecutando comando: {ex.Message}");
-                }
-            }
+            var msg = NewMessage("GearDown", JsonSerializer.SerializeToElement(gearDown));
+            Console.WriteLine($"[Send] GearDown = {gearDown} (seq={msg.sequence}, origin={msg.originId})");
+            await SendAsync(msg).ConfigureAwait(false);
         }
 
-        private void ConfigureMode()
-        {
-            Console.WriteLine("Selecciona modo: 1) Host  2) Cliente");
-            Console.Write("> ");
-            var opt = Console.ReadLine();
-            isHost = opt?.Trim() != "2";
-
-            if (isHost)
-            {
-                var localIp = GetLocalIpAddress();
-                Console.Write("Nombre de cabina: ");
-                var name = Console.ReadLine()?.Trim();
-                if (string.IsNullOrWhiteSpace(name)) name = "Cabina";
-
-                Console.Write("¿Cabina pública? (S/N): ");
-                bool pub = (Console.ReadLine()?.Trim().ToUpperInvariant() == "S");
-
-                Console.WriteLine($"🚀 Cabina '{name}' iniciada en ws://{localIp}:8081 ({(pub ? "pública" : "privada")})");
-
-                hostServer = new WebSocketHost(8081);
-                hostServer.OnClientConnected += id => Logger.Info($"✅ Cliente conectado ({id})");
-                hostServer.OnMessage += OnWebSocketMessage;
-                hostServer.Start();
-            }
-            else
-            {
-                Console.WriteLine("👂 Escuchando broadcasts LAN (simplificado)...");
-                var ip = "192.168.58.117";
-                webSocketUrl = $"ws://{ip}:8081";
-            }
-        }
-
-        private static string GetLocalIpAddress()
-        {
-            var ip = Dns.GetHostAddresses(Dns.GetHostName())
-                .FirstOrDefault(i => i.AddressFamily == AddressFamily.InterNetwork);
-            return ip?.ToString() ?? "127.0.0.1";
-        }
-
-        private void SetupWebSocket()
-        {
-            if (isHost) return;
-
-            ws = new WebSocketManager(webSocketUrl, sim);
-            ws.OnOpen += () => Logger.Info($"🌐 Conectado al servidor WebSocket: {webSocketUrl}");
-            ws.OnMessage += OnWebSocketMessage;
-            ws.OnError += msg => Logger.Warn($"Error WS: {msg}");
-            ws.OnClose += () => Logger.Warn("Conexión WS cerrada.");
-            ws.Connect();
-        }
-
-        private void SetupShutdownHandlers()
-        {
-            Console.CancelKeyPress += (_, e) =>
-            {
-                e.Cancel = true;
-                Shutdown();
-                Environment.Exit(0);
-            };
-        }
-
-        private void OnWebSocketMessage(string message)
-        {
-            if (string.IsNullOrWhiteSpace(message)) return;
-            ApplyRemotePayload(message);
-        }
-
-        private void ApplyRemotePayload(string message)
+        private void HandleIncomingJson(string json)
         {
             try
             {
-                using var doc = JsonDocument.Parse(message);
+                using var doc = JsonDocument.Parse(json);
                 var root = doc.RootElement;
+                if (!root.TryGetProperty("type", out var t) || t.GetString() != "stateChange")
+                    return;
 
-                if (!root.TryGetProperty("type", out var typeProp)) return;
-                var type = typeProp.GetString();
+                var msg = JsonSerializer.Deserialize<StateChangeMessage>(json);
+                if (msg == null)
+                    return;
 
-                string? remoteSource = null;
-                if (root.TryGetProperty("source", out var srcProp))
-                    remoteSource = srcProp.GetString();
-
-                if (!string.IsNullOrWhiteSpace(remoteSource) &&
-                    string.Equals(remoteSource, sourceTag, StringComparison.Ordinal))
+                if (Guid.TryParse(msg.originId, out var originGuid))
                 {
-                    return; // mensaje originado por nosotros
+                    if (originGuid == localInstanceId)
+                        return;
                 }
-
-                if (type == "aircraft_state" &&
-                    root.TryGetProperty("variable", out var v) &&
-                    root.TryGetProperty("value", out var val))
+                else
                 {
-                    var variable = v.GetString();
-                    if (!string.IsNullOrEmpty(variable))
-                    {
-                        // Supresión por variable (1s) para cubrir animaciones async
-                        _suppressUntilByVar[variable] = DateTime.UtcNow.AddMilliseconds(1000);
-
-                        WithOutboundSuppressed(() =>
-                        {
-                            aircraftState.ApplyRemoteChange(variable, val);
-                            Logger.Info($"[RemoteChange] {variable} = {FormatValue(val)} (desde {remoteSource ?? "desconocido"})");
-                        });
-                    }
                     return;
                 }
 
-                if (type == "sync-update" && root.TryGetProperty("changes", out var changes))
-                {
-                    var dict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-                    foreach (var prop in changes.EnumerateObject())
-                    {
-                        object? boxed = prop.Value.ValueKind switch
-                        {
-                            JsonValueKind.Number => prop.Value.TryGetDouble(out var d) ? d : (object?)prop.Value.ToString(),
-                            JsonValueKind.True => true,
-                            JsonValueKind.False => false,
-                            JsonValueKind.String => prop.Value.GetString(),
-                            _ => prop.Value.ToString()
-                        };
-                        dict[prop.Name] = boxed;
+                var lastSeen = lastSeqByOrigin.GetOrAdd(msg.originId, -1);
+                if (msg.sequence <= lastSeen)
+                    return;
+                lastSeqByOrigin[msg.originId] = msg.sequence;
 
-                        // Supresión por variable para todas las incluidas en el snapshot
-                        _suppressUntilByVar[prop.Name] = DateTime.UtcNow.AddMilliseconds(1000);
-                    }
-
-                    var incoming = BuildSnapshotFromFlat(dict);
-
-                    WithOutboundSuppressed(() =>
-                    {
-                        sim.InjectSnapshot(incoming);
-                        Logger.Info($"[RemoteSnapshot] {dict.Count} variables aplicadas (desde {remoteSource ?? "desconocido"})");
-                    });
-                }
+                ApplyRemoteState(msg);
             }
             catch (Exception ex)
             {
-                Logger.Warn($"⚠️ Error aplicando datos remotos: {ex.Message}");
+                Console.WriteLine($"[Sync] Error parseando mensaje: {ex.Message}");
             }
         }
 
-        private void OnLocalSnapshot(SimStateSnapshot snap)
+        private void ApplyRemoteState(StateChangeMessage msg)
         {
-            lock (snapshotLock)
+            switch (msg.prop)
             {
-                pendingSnapshot = snap?.Clone() ?? snap;
-                hasPendingSnapshot = pendingSnapshot is not null;
-            }
-        }
-
-        private void OnLocalStateChanged(string variable, object value)
-        {
-            // Si el cambio proviene de una aplicación REMOTA (bloque síncrono)
-            if (Volatile.Read(ref _suppressOutbound) > 0) return;
-
-            // Si la variable está en supresión temporal (por animación async)
-            if (_suppressUntilByVar.TryGetValue(variable, out var until) && until > DateTime.UtcNow)
-            {
-                // Logger.Info($"[LocalChangeSuppressed] {variable} (animación remota)");
-                return;
-            }
-
-            // Filtro EPS para numéricos: no emitir cambios insignificantes
-            if (value is double d)
-            {
-                var last = _lastSentNumeric.GetOrAdd(variable, double.NaN);
-                if (!double.IsNaN(last) && Math.Abs(d - last) < EPS_NUM)
-                    return;
-                _lastSentNumeric[variable] = d;
-            }
-            else if (value is float f)
-            {
-                var d2 = (double)f;
-                var last = _lastSentNumeric.GetOrAdd(variable, double.NaN);
-                if (!double.IsNaN(last) && Math.Abs(d2 - last) < EPS_NUM)
-                    return;
-                _lastSentNumeric[variable] = d2;
-            }
-            else if (value is bool b)
-            {
-                if (_lastSentBool.TryGetValue(variable, out var lastB) && lastB == b)
-                    return;
-                _lastSentBool[variable] = b;
-            }
-
-            try
-            {
-                var payload = new
-                {
-                    type = "aircraft_state",
-                    variable,
-                    value,
-                    source = sourceTag,
-                    timestamp = DateTime.UtcNow.ToString("o")
-                };
-                var json = JsonSerializer.Serialize(payload, jsonOptions);
-
-                if (isHost && hostServer != null)
-                {
-                    hostServer.Broadcast(json);
-                    Logger.Info($"[Broadcast] {FormatVar(variable)} = {FormatValue(value)}");
-                }
-                else if (ws != null)
-                {
-                    ws.Send(json);
-                    Logger.Info($"[Send] {FormatVar(variable)} = {FormatValue(value)}");
-                }
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"⚠️ Error enviando estado individual: {ex.Message}");
-            }
-        }
-
-        private void StartSynchronizationLoop()
-        {
-            if (syncTimer != null) return;
-
-            syncTimer = new System.Threading.Timer(_ =>
-            {
-                try
-                {
-                    SimStateSnapshot? snapshot;
-                    lock (snapshotLock)
+                case "Flaps":
+                    if (msg.value.ValueKind == JsonValueKind.Number && msg.value.TryGetDouble(out var target))
                     {
-                        if (!hasPendingSnapshot || pendingSnapshot == null) return;
-                        snapshot = pendingSnapshot;
-                        hasPendingSnapshot = false;
-                        pendingSnapshot = null;
+                        Console.WriteLine($"[RemoteChange] Flaps = {target} (from {msg.originId}, seq={msg.sequence})");
+                        flapsAnimator.AnimateTo(target);
                     }
-
-                    var flat = FlattenSnapshot(snapshot);
-
-                    var json = JsonSerializer.Serialize(new
+                    break;
+                case "GearDown":
+                    if (msg.value.ValueKind is JsonValueKind.True or JsonValueKind.False)
                     {
-                        type = "sync-update",
-                        changes = flat,
-                        source = sourceTag,
-                        timestamp = DateTime.UtcNow.ToString("o")
-                    }, jsonOptions);
-
-                    if (isHost) hostServer?.Broadcast(json);
-                    else ws?.Send(json);
-
-                    // Logger.Info($"[ContinuousSync] Snapshot enviado ({flat.Count} variables)");
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"Error en loop de sync: {ex.Message}");
-                }
-            },
-            null,
-            TimeSpan.Zero,
-            TimeSpan.FromMilliseconds(300));
+                        var newVal = msg.value.GetBoolean();
+                        gearDown = newVal;
+                        Console.WriteLine($"[RemoteChange] GearDown = {gearDown} (from {msg.originId}, seq={msg.sequence})");
+                    }
+                    break;
+                default:
+                    Console.WriteLine($"[RemoteChange] {msg.prop} = {msg.value} (from {msg.originId}, seq={msg.sequence})");
+                    break;
+            }
         }
 
-        private static Dictionary<string, object?> FlattenSnapshot(SimStateSnapshot snap)
+        private StateChangeMessage NewMessage(string prop, JsonElement value)
         {
-            var flat = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-            if (!snap.Controls.Equals(default(ControlsStruct)))
+            var seq = Interlocked.Increment(ref localSequence);
+            return new StateChangeMessage
             {
-                var c = snap.Controls;
-                flat["Throttle"] = c.Throttle;
-                flat["Flaps"] = c.Flaps;
-                flat["GearDown"] = c.GearDown;
-                flat["ParkingBrake"] = c.ParkingBrake;
-            }
-
-            if (!snap.Systems.Equals(default(SystemsStruct)))
-            {
-                var s = snap.Systems;
-                flat["LightsOn"] = s.LightsOn;
-                flat["DoorOpen"] = s.DoorOpen;
-                flat["AvionicsOn"] = s.AvionicsOn;
-            }
-
-            return flat;
-        }
-
-        private static SimStateSnapshot BuildSnapshotFromFlat(Dictionary<string, object?> flat)
-        {
-            var controls = new ControlsStruct
-            {
-                Throttle = GetDouble(flat, "Throttle"),
-                Flaps = GetDouble(flat, "Flaps"),
-                GearDown = GetBool(flat, "GearDown"),
-                ParkingBrake = GetBool(flat, "ParkingBrake")
-            };
-
-            var systems = new SystemsStruct
-            {
-                LightsOn = GetBool(flat, "LightsOn"),
-                DoorOpen = GetBool(flat, "DoorOpen"),
-                AvionicsOn = GetBool(flat, "AvionicsOn")
-            };
-
-            return new SimStateSnapshot
-            {
-                Controls = controls,
-                Systems = systems
+                prop = prop,
+                value = value,
+                originId = localInstanceId.ToString(),
+                sequence = seq,
+                serverTime = 0
             };
         }
 
-        private static double GetDouble(IDictionary<string, object?> dict, string key, double fallback = 0)
+        private Task SendAsync(StateChangeMessage msg)
         {
-            if (dict.TryGetValue(key, out var v) && v is not null)
-            {
-                if (v is double d) return d;
-                if (v is float f) return f;
-                if (v is int i) return i;
-                if (double.TryParse(v.ToString(), out var p)) return p;
-            }
-            return fallback;
+            var json = JsonSerializer.Serialize(msg);
+            return bus.SendAsync(json);
         }
-
-        private static bool GetBool(IDictionary<string, object?> dict, string key, bool fallback = false)
-        {
-            if (dict.TryGetValue(key, out var v) && v is not null)
-            {
-                if (v is bool b) return b;
-                if (v is int i) return i != 0;
-                if (bool.TryParse(v.ToString(), out var p)) return p;
-                if (double.TryParse(v.ToString(), out var d)) return Math.Abs(d) > 0.5;
-            }
-            return fallback;
-        }
-
-        private static string FormatValue(object? value)
-        {
-            if (value is null) return "null";
-            return value switch
-            {
-                bool b => b ? "true" : "false",
-                double d => d.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
-                float f => f.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture),
-                _ => value.ToString() ?? "?"
-            };
-        }
-
-        private static string FormatVar(string v) => v ?? "?";
-
-        private void WithOutboundSuppressed(Action action)
-        {
-            Interlocked.Increment(ref _suppressOutbound);
-            try { action(); }
-            finally { Interlocked.Decrement(ref _suppressOutbound); }
-        }
-
-        private void Shutdown()
-        {
-            syncTimer?.Dispose();
-            try { ws?.Close(); } catch { }
-            try { hostServer?.Stop(); } catch { }
-            try { sim.Dispose(); } catch { }
-        }
-
-        public void Dispose() => Shutdown();
     }
 }

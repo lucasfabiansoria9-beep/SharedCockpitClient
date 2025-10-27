@@ -14,7 +14,7 @@ namespace SharedCockpitClient
         private TcpClient client = null!;
         private NetworkStream stream = null!;
         private CancellationTokenSource cts = null!;
-        private WebSocketManager wsManager = null!;
+        private LegacyWebSocketManager wsManager = null!;
         private SimConnectManager simConnectManager = null!;
         private AircraftStateManager aircraftState = null!;
 
@@ -61,7 +61,7 @@ namespace SharedCockpitClient
                 simConnectManager.EnableMockMode();
 
                 // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
-                wsManager = new WebSocketManager("ws://127.0.0.1:12345", simConnectManager);
+                wsManager = new LegacyWebSocketManager("ws://127.0.0.1:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();
             }
@@ -88,7 +88,7 @@ namespace SharedCockpitClient
                 simConnectManager.EnableMockMode();
 
                 // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
-                wsManager = new WebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);
+                wsManager = new LegacyWebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);
                 HookWebSocketEvents();
                 wsManager.Connect();
             }

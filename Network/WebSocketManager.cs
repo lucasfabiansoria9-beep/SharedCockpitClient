@@ -1,300 +1,185 @@
 using System;
-using System.IO;
-using System.IO.Compression;
 using System.Net.WebSockets;
 using System.Text;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using SharedCockpitClient.FlightData;
-using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
     /// <summary>
-    /// Cliente WebSocket que maneja la conexión entre piloto y copiloto.
-    /// Escucha mensajes, maneja reconexiones y notifica eventos al simulador.
+    /// Gestor WebSocket bidireccional compatible con host y cliente.
+    /// Implementa el bus requerido por SyncController con anti-eco y sellado serverTime.
     /// </summary>
-    public class WebSocketManager : IDisposable
+    public sealed class WebSocketManager : INetworkBus, IDisposable
     {
-        private readonly string url;
-        private readonly SimConnectManager sim;
+        private readonly bool isHost;
+        private readonly Uri? peerUri;
+        private readonly WebSocketHost? host;
         private ClientWebSocket? client;
-        private CancellationTokenSource? cts;
-        private Task? workerTask;
-        private bool disposed;
-        private string userRole = string.Empty;
+        private CancellationTokenSource? linkedCts;
 
-        public event Action OnOpen = delegate { };
-        public event Action<string> OnMessage = delegate { };
-        public event Action<string> OnError = delegate { };
-        public event Action OnClose = delegate { };
+        public event Action<string>? OnMessage;
 
-        public WebSocketManager(string serverUrl, SimConnectManager simConnectManager)
+        public WebSocketManager(bool isHost, Uri? peer = null, int? portOverride = null)
         {
-            url = serverUrl ?? throw new ArgumentNullException(nameof(serverUrl));
-            sim = simConnectManager ?? throw new ArgumentNullException(nameof(simConnectManager));
-        }
+            this.isHost = isHost;
+            peerUri = peer;
 
-        public void Connect()
-        {
-            if (disposed)
-                return;
-
-            if (workerTask != null && !workerTask.IsCompleted)
+            if (isHost)
             {
-                Logger.Warn("⚠️ La conexión WebSocket ya está en curso.");
-                return;
-            }
-
-            cts = new CancellationTokenSource();
-            workerTask = Task.Run(() => RunAsync(cts.Token));
-        }
-
-        public void Send(string message)
-        {
-            var socket = client;
-            if (socket == null || socket.State != WebSocketState.Open)
-            {
-                Logger.Warn("⚠️ No se puede enviar el mensaje: WebSocket no está conectado o es nulo.");
-                return;
-            }
-
-            var payload = PreparePayload(message);
-            _ = SendInternalAsync(socket, payload);
-        }
-
-        public void Close()
-        {
-            if (disposed)
-                return;
-
-            disposed = true;
-
-            try { cts?.Cancel(); } catch { }
-
-            if (client != null)
-            {
-                try
-                {
-                    if (client.State is WebSocketState.Open or WebSocketState.CloseReceived)
-                    {
-                        client.CloseAsync(
-                            WebSocketCloseStatus.NormalClosure,
-                            "Cierre solicitado",
-                            CancellationToken.None
-                        ).Wait(TimeSpan.FromSeconds(1));
-                    }
-                }
-                catch (Exception ex)
-                {
-                    Logger.Warn($"⚠️ Error al cerrar WebSocket: {ex.Message}");
-                }
-                finally
-                {
-                    client.Dispose();
-                }
-            }
-
-            try { workerTask?.Wait(TimeSpan.FromSeconds(2)); } catch { }
-
-            cts?.Dispose();
-            client = null;
-            workerTask = null;
-
-            OnClose.Invoke();
-            Logger.Info("🔌 Conexión WebSocket cerrada correctamente.");
-        }
-
-        public void Dispose() => Close();
-
-        private async Task RunAsync(CancellationToken token)
-        {
-            while (!token.IsCancellationRequested)
-            {
-                using var ws = new ClientWebSocket();
-
-                // 🔧 Desactiva completamente la compresión para compatibilidad universal
-                try
-                {
-                    ws.Options.SetRequestHeader("Sec-WebSocket-Extensions", ""); // Elimina permessage-deflate
-                }
-                catch { /* En algunos sistemas SetRequestHeader puede fallar, se ignora */ }
-
-                ws.Options.DangerousDeflateOptions = null; // Evita frames comprimidos
-                ws.Options.AddSubProtocol("sharedcockpit"); // Handshake limpio
-                ws.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
-
-                client = ws;
-
-                try
-                {
-                    await ws.ConnectAsync(new Uri(url), token).ConfigureAwait(false);
-                    Logger.Info($"🌐 Conectado al servidor WebSocket: {url}");
-                    OnOpen.Invoke();
-
-                    await ReceiveLoopAsync(ws, token).ConfigureAwait(false);
-
-                    if (ws.State == WebSocketState.CloseReceived)
-                    {
-                        await ws.CloseOutputAsync(
-                            WebSocketCloseStatus.NormalClosure,
-                            "Cierre reconocido",
-                            CancellationToken.None
-                        ).ConfigureAwait(false);
-                    }
-                }
-                catch (OperationCanceledException)
-                {
-                    break;
-                }
-                catch (Exception ex)
-                {
-                    Logger.Error($"❌ Error al conectar WebSocket: {ex.Message}");
-                    OnError.Invoke(ex.Message);
-                }
-
-                client = null;
-
-                if (token.IsCancellationRequested)
-                    break;
-
-                if (ws.State != WebSocketState.Open && ws.State != WebSocketState.Connecting)
-                    OnClose.Invoke();
-
-                try { await Task.Delay(TimeSpan.FromSeconds(2), token).ConfigureAwait(false); }
-                catch (OperationCanceledException) { break; }
-
-                Logger.Warn("🔁 Intentando reconectar al servidor WebSocket...");
+                var listenPort = portOverride ?? peer?.Port ?? 8081;
+                host = new WebSocketHost(listenPort);
+                host.OnMessage += HandleHostMessage;
+                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] Cliente conectado ({id})");
+                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] Cliente desconectado ({id})");
+                host.Start();
+                Console.WriteLine($"[WebSocket] Host escuchando en ws://0.0.0.0:{listenPort}");
             }
         }
 
-        private async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken token)
+        public async Task StartAsync(CancellationToken ct)
         {
-            var buffer = new byte[8192];
+            if (isHost)
+            {
+                await Task.CompletedTask;
+                return;
+            }
 
+            linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            client = new ClientWebSocket();
+            await client.ConnectAsync(peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente."), ct)
+                .ConfigureAwait(false);
+            Console.WriteLine($"[WebSocket] Conectado a {peerUri}");
+            _ = Task.Run(() => ReceiveLoopAsync(client, linkedCts.Token));
+        }
+
+        public async Task SendAsync(string json)
+        {
+            if (isHost)
+            {
+                await BroadcastAsync(json).ConfigureAwait(false);
+                return;
+            }
+
+            var ws = client;
+            if (ws == null || ws.State != WebSocketState.Open)
+                return;
+
+            var bytes = Encoding.UTF8.GetBytes(json);
+            await ws.SendAsync(new ArraySegment<byte>(bytes), WebSocketMessageType.Text, true, CancellationToken.None)
+                .ConfigureAwait(false);
+        }
+
+        public async Task BroadcastAsync(string json)
+        {
+            if (!isHost || host is null)
+                return;
+
+            if (TryStampServerTime(json, out var stamped))
+            {
+                json = stamped;
+            }
+
+            host.Broadcast(json);
+            Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            await Task.CompletedTask;
+        }
+
+        private void HandleHostMessage(string json)
+        {
+            if (TryStampServerTime(json, out var stamped))
+            {
+                json = stamped;
+            }
+
+            host?.Broadcast(json);
+            Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            OnMessage?.Invoke(json);
+        }
+
+        private static bool TryStampServerTime(string json, out string stamped)
+        {
+            stamped = json;
             try
             {
-                while (!token.IsCancellationRequested && ws.State == WebSocketState.Open)
+                var msg = JsonSerializer.Deserialize<StateChangeMessage>(json);
+                if (msg != null)
                 {
-                    var builder = new StringBuilder();
-                    WebSocketReceiveResult result;
-                    do
-                    {
-                        result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), token).ConfigureAwait(false);
-
-                        if (result.MessageType == WebSocketMessageType.Close)
-                            return;
-
-                        if (result.MessageType != WebSocketMessageType.Text)
-                            continue;
-
-                        builder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
-                    }
-                    while (!result.EndOfMessage);
-
-                    if (builder.Length > 0)
-                        HandleIncomingMessage(builder.ToString());
+                    msg.serverTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+                    stamped = JsonSerializer.Serialize(msg);
+                    return true;
                 }
-            }
-            catch (OperationCanceledException)
-            {
-                // Cancelado
-            }
-            catch (WebSocketException ex)
-            {
-                Logger.Warn($"⚠️ Error en WebSocket de cliente: {ex.Message}");
-                OnError.Invoke(ex.Message);
-            }
-            catch (Exception ex)
-            {
-                Logger.Error($"⚠️ Excepción en recepción WebSocket: {ex.Message}");
-                OnError.Invoke(ex.Message);
-            }
-        }
-
-        private async Task SendInternalAsync(ClientWebSocket socket, byte[] payload)
-        {
-            try
-            {
-                await socket.SendAsync(
-                    new ArraySegment<byte>(payload),
-                    WebSocketMessageType.Text,
-                    true,
-                    CancellationToken.None
-                ).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Logger.Warn($"⚠️ Error enviando mensaje WebSocket: {ex.Message}");
-                OnError.Invoke(ex.Message);
-            }
-        }
-
-        private void HandleIncomingMessage(string message)
-        {
-            message = MaybeDecompress(message);
-            if (message.StartsWith("ROLE:", StringComparison.OrdinalIgnoreCase))
-            {
-                var assignedRole = message.Substring("ROLE:".Length).Trim();
-                if (!string.IsNullOrEmpty(assignedRole))
-                {
-                    var normalizedRole = assignedRole.ToUpperInvariant();
-                    if (!string.Equals(userRole, normalizedRole, StringComparison.OrdinalIgnoreCase))
-                    {
-                        userRole = normalizedRole;
-                        Logger.Info($"✅ Rol asignado localmente: {userRole}");
-                        sim.SetUserRole(userRole);
-                    }
-                }
-                return;
-            }
-
-            OnMessage.Invoke(message);
-        }
-
-        private static byte[] PreparePayload(string message)
-        {
-            var bytes = Encoding.UTF8.GetBytes(message);
-            if (bytes.Length < 512)
-            {
-                return bytes;
-            }
-
-            try
-            {
-                using var output = new MemoryStream();
-                using (var gzip = new GZipStream(output, CompressionLevel.Fastest, leaveOpen: true))
-                {
-                    gzip.Write(bytes, 0, bytes.Length);
-                }
-
-                var compressed = Convert.ToBase64String(output.ToArray());
-                return Encoding.UTF8.GetBytes("gz:" + compressed);
             }
             catch
             {
-                return bytes;
+                // Mensaje no compatible; no forzamos formato.
+            }
+
+            return false;
+        }
+
+        private async Task ReceiveLoopAsync(ClientWebSocket ws, CancellationToken ct)
+        {
+            var buffer = new byte[64 * 1024];
+            while (!ct.IsCancellationRequested && ws.State == WebSocketState.Open)
+            {
+                var builder = new StringBuilder();
+                WebSocketReceiveResult result;
+                do
+                {
+                    result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
+                    if (result.MessageType == WebSocketMessageType.Close)
+                        return;
+                    if (result.MessageType != WebSocketMessageType.Text)
+                        continue;
+
+                    builder.Append(Encoding.UTF8.GetString(buffer, 0, result.Count));
+                }
+                while (!result.EndOfMessage);
+
+                if (builder.Length > 0)
+                {
+                    var message = MaybeDecompress(builder.ToString());
+                    OnMessage?.Invoke(message);
+                }
             }
         }
 
         private static string MaybeDecompress(string message)
         {
             if (!message.StartsWith("gz:", StringComparison.Ordinal))
-            {
                 return message;
-            }
 
             try
             {
                 var compressed = Convert.FromBase64String(message[3..]);
-                using var input = new MemoryStream(compressed);
-                using var gzip = new GZipStream(input, CompressionMode.Decompress);
-                using var reader = new StreamReader(gzip, Encoding.UTF8);
+                using var input = new System.IO.MemoryStream(compressed);
+                using var gzip = new System.IO.Compression.GZipStream(input, System.IO.Compression.CompressionMode.Decompress);
+                using var reader = new System.IO.StreamReader(gzip, Encoding.UTF8);
                 return reader.ReadToEnd();
             }
             catch
             {
                 return message;
+            }
+        }
+
+        public void Dispose()
+        {
+            if (isHost)
+            {
+                if (host != null)
+                {
+                    host.OnMessage -= HandleHostMessage;
+                    host.Stop();
+                }
+            }
+            else
+            {
+                try { linkedCts?.Cancel(); } catch { }
+                linkedCts?.Dispose();
+                client?.Dispose();
             }
         }
     }
