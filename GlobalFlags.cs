@@ -13,19 +13,19 @@ namespace SharedCockpitClient
         public static bool IsLabMode { get; private set; } = InitializeLabMode();
 
         /// <summary>
-        /// Rol del usuario en la sesión (PILOT / COPILOT).
-        /// </summary>
-        public static string UserRole { get; set; } = "PILOT";
-
-        /// <summary>
         /// Rol lógico del nodo (HOST / CLIENT) para WebSocketManager.
         /// </summary>
-        public static string Role { get; set; } = "HOST";
+        public static string Role { get; set; } = string.Empty;
 
         /// <summary>
         /// Dirección IP o host remoto al que se conectará el cliente.
         /// </summary>
-        public static string PeerAddress { get; set; } = "127.0.0.1";
+        public static string PeerAddress { get; set; } = string.Empty;
+
+        /// <summary>
+        /// Rol del usuario en la sesión (PILOT / COPILOT).
+        /// </summary>
+        public static string UserRole { get; set; } = "PILOT";
 
         /// <summary>
         /// Fuerza el modo laboratorio desde código (por ejemplo con --lab).

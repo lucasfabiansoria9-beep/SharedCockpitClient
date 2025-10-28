@@ -63,7 +63,7 @@ namespace SharedCockpitClient.FlightData
         /// <summary>
         /// Indica si representa únicamente cambios respecto al snapshot previo.
         /// </summary>
-        public bool IsDiff { get; }
+        public bool IsDiff { get; set; }
 
         /// <summary>
         /// Secuencia global o correlativo asociado al snapshot.
@@ -143,16 +143,71 @@ namespace SharedCockpitClient.FlightData
             foreach (var kv in diff.Values)
             {
                 if (kv.Value is null)
-                {
-                    merged.Remove(kv.Key);
-                }
-                else
-                {
-                    merged[kv.Key] = kv.Value;
-                }
+                    continue;
+
+                merged[kv.Key] = kv.Value;
             }
 
             return new SimStateSnapshot(merged, diff.TimestampUtc, false, diff.Sequence);
+        }
+
+        public bool TryGetDouble(string path, out double value)
+            => SimStateSnapshotExtensions.TryGetDouble(this, path, out value);
+
+        public bool TryGetInt32(string path, out int value)
+        {
+            if (!TryGetValue(path, out var raw) || raw is null)
+            {
+                value = 0;
+                return false;
+            }
+
+            switch (raw)
+            {
+                case int i:
+                    value = i;
+                    return true;
+                case long l when l >= int.MinValue && l <= int.MaxValue:
+                    value = (int)l;
+                    return true;
+                case double d when d >= int.MinValue && d <= int.MaxValue:
+                    value = (int)Math.Round(d);
+                    return true;
+                case string s when int.TryParse(s, out var parsed):
+                    value = parsed;
+                    return true;
+                default:
+                    value = 0;
+                    return false;
+            }
+        }
+
+        public bool TryGetInt64(string path, out long value)
+        {
+            if (!TryGetValue(path, out var raw) || raw is null)
+            {
+                value = 0;
+                return false;
+            }
+
+            switch (raw)
+            {
+                case long l:
+                    value = l;
+                    return true;
+                case int i:
+                    value = i;
+                    return true;
+                case double d:
+                    value = (long)Math.Round(d);
+                    return true;
+                case string s when long.TryParse(s, out var parsed):
+                    value = parsed;
+                    return true;
+                default:
+                    value = 0;
+                    return false;
+            }
         }
 
         public SimStateSnapshot Clone()

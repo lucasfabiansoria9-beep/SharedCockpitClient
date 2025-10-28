@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -8,6 +9,7 @@ using SharedCockpitClient.FlightData;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Persistence;
 using SharedCockpitClient.Sync;
+using SharedCockpitClient.UI;
 
 namespace SharedCockpitClient
 {
@@ -29,6 +31,8 @@ namespace SharedCockpitClient
         private Label? _hudLabel;
         private System.Windows.Forms.Timer? _hudTimer;   // ✅ corregido
         private bool _hudVisible;
+        private bool _hudDiagnosticsExpanded;
+        private System.Windows.Forms.Timer? _autosaveTimer;
 
         public MainForm()
         {
@@ -45,6 +49,12 @@ namespace SharedCockpitClient
         {
             try
             {
+                if (!EnsureRoleSelection())
+                {
+                    Close();
+                    return;
+                }
+
                 // 1️⃣ Restaurar snapshot previo
                 var previous = await _snapshotStore.LoadAsync(default);
                 foreach (var kv in previous)
@@ -52,20 +62,14 @@ namespace SharedCockpitClient
 
                 // 2️⃣ Determinar rol (HOST / CLIENT)
                 bool isHost = string.Equals(GlobalFlags.Role, "HOST", StringComparison.OrdinalIgnoreCase);
-                Uri? peerUri = null;
-
-                if (!isHost)
-                {
-                    var peer = GlobalFlags.PeerAddress;
-                    if (!string.IsNullOrWhiteSpace(peer))
-                        peerUri = new Uri($"ws://{peer}:8081");
-                }
+                Uri? peerUri = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
+                    ? null
+                    : new Uri($"ws://{GlobalFlags.PeerAddress}:8081");
 
                 // 3️⃣ Iniciar WebSocket
                 _wsManager = new WebSocketManager(isHost, peerUri);
                 _wsCts = new CancellationTokenSource();
-                if (!isHost)
-                    _ = _wsManager.StartAsync(_wsCts.Token); // cliente
+                _ = _wsManager.StartAsync(_wsCts.Token);
 
                 // 4️⃣ Iniciar SimConnect
                 _simManager.Start();
@@ -74,6 +78,8 @@ namespace SharedCockpitClient
                 _realtimeSync = new RealtimeSyncManager(_simManager, _wsManager);
                 _simManager.OnSnapshot += HandleSimSnapshot;
                 _wsManager.OnStateDiff += HandleStateDiff;
+
+                StartAutosaveTimer();
 
                 Console.WriteLine("[MainForm] ✅ Cliente iniciado correctamente (sincronización RT activa).");
             }
@@ -105,6 +111,12 @@ namespace SharedCockpitClient
                     _hudTimer.Dispose();
                 }
 
+                if (_autosaveTimer != null)
+                {
+                    _autosaveTimer.Stop();
+                    _autosaveTimer.Dispose();
+                }
+
                 Console.WriteLine("[MainForm] 📴 Cliente cerrado correctamente.");
             }
             catch (Exception ex)
@@ -115,6 +127,12 @@ namespace SharedCockpitClient
 
         protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
         {
+            if (keyData == (Keys.Control | Keys.F12))
+            {
+                ToggleHudDiagnostics();
+                return true;
+            }
+
             if (keyData == Keys.F12)
             {
                 ToggleHud();
@@ -131,7 +149,7 @@ namespace SharedCockpitClient
                 _latestSnapshot = snapshot.Clone();
             }
 
-            _realtimeSync?.UpdateAndSync(snapshot, GlobalFlags.UserRole);
+            _realtimeSync?.UpdateAndSync(snapshot, GlobalFlags.Role);
         }
 
         private void HandleStateDiff(string? role, Dictionary<string, object?> diff)
@@ -173,16 +191,17 @@ namespace SharedCockpitClient
 
             _hudPanel = new Panel
             {
-                Size = new Size(220, 110),
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
                 BackColor = Color.FromArgb(160, 16, 16, 16),
                 ForeColor = Color.White,
                 Anchor = AnchorStyles.Top | AnchorStyles.Right,
-                Location = new Point(ClientSize.Width - 240, 20)
             };
 
             _hudLabel = new Label
             {
-                Dock = DockStyle.Fill,
+                AutoSize = true,
+                MaximumSize = new Size(260, 0),
                 TextAlign = ContentAlignment.MiddleLeft,
                 Font = new Font(FontFamily.GenericMonospace, 10f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(240, 240, 240)
@@ -194,6 +213,8 @@ namespace SharedCockpitClient
 
             _hudTimer = new System.Windows.Forms.Timer { Interval = 500 }; // ✅ corregido
             _hudTimer.Tick += UpdateHud;
+            Resize += (_, _) => PositionHud();
+            PositionHud();
         }
 
         private void UpdateHud(object? sender, EventArgs e)
@@ -208,8 +229,8 @@ namespace SharedCockpitClient
                     snapshotCopy = _latestSnapshot.Clone();
             }
 
-            string ias = "--";
-            string alt = "--";
+            string ias = "—";
+            string alt = "—";
             if (snapshotCopy != null)
             {
                 if (snapshotCopy.TryGetDouble("AIRSPEED INDICATED", out var iasValue))
@@ -219,9 +240,38 @@ namespace SharedCockpitClient
             }
 
             var wsState = _wsManager?.IsConnected == true ? "🟢" : "🔴";
+            var simState = _simManager?.IsConnected == true ? "🟢" : "⚪ Offline";
             var rate = _realtimeSync?.CurrentDiffRate ?? 0;
+            var builder = new StringBuilder();
+            var roleText = string.IsNullOrWhiteSpace(GlobalFlags.Role) ? "—" : GlobalFlags.Role.ToUpperInvariant();
+            builder.AppendLine($"Mode {roleText}");
+            builder.AppendLine($"SIM {simState}");
+            builder.AppendLine($"WS {wsState}");
+            builder.AppendLine($"IAS {ias} kt");
+            builder.AppendLine($"ALT {alt} ft");
 
-            _hudLabel.Text = $"IAS {ias} kt\nALT {alt} ft\nWS {wsState}\nSyncRate {rate:0.0} diff/s";
+            if (_hudDiagnosticsExpanded)
+            {
+                builder.AppendLine($"Ping {FormatMs(_wsManager?.AverageRttMs)} ms");
+                builder.AppendLine($"Lag {FormatMs(_wsManager?.AverageLagMs)} ms");
+                builder.AppendLine($"FPS {FormatFps(_simManager?.LastFps)}");
+            }
+
+            builder.Append($"SyncRate {rate:0.0} diff/s");
+
+            _hudLabel.Text = builder.ToString();
+            PositionHud();
+        }
+
+        private void PositionHud()
+        {
+            if (_hudPanel == null)
+                return;
+
+            const int margin = 20;
+            var x = Math.Max(margin, ClientSize.Width - _hudPanel.Width - margin);
+            var y = margin;
+            _hudPanel.Location = new Point(x, y);
         }
 
         // ====== Handlers requeridos por el Designer ======
@@ -229,5 +279,77 @@ namespace SharedCockpitClient
         private void btnHost_Click(object sender, EventArgs e) { }
         private void btnClient_Click(object sender, EventArgs e) { }
         private void btnStop_Click(object sender, EventArgs e) { }
+
+        private bool EnsureRoleSelection()
+        {
+            var needRole = string.IsNullOrWhiteSpace(GlobalFlags.Role) || Control.ModifierKeys.HasFlag(Keys.F2);
+            if (!needRole)
+                return true;
+
+            using var dlg = new RoleDialog();
+            var result = dlg.ShowDialog(this);
+            if (result != DialogResult.OK)
+                return false;
+
+            GlobalFlags.Role = dlg.SelectedRole ?? "HOST";
+            GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
+            return true;
+        }
+
+        private void ToggleHudDiagnostics()
+        {
+            if (!_hudVisible)
+            {
+                ToggleHud();
+            }
+
+            _hudDiagnosticsExpanded = !_hudDiagnosticsExpanded;
+            UpdateHud(this, EventArgs.Empty);
+        }
+
+        private static string FormatMs(double? value)
+        {
+            if (!value.HasValue || value.Value <= 0 || double.IsNaN(value.Value))
+                return "—";
+
+            return value.Value.ToString("0");
+        }
+
+        private static string FormatFps(double? value)
+        {
+            if (!value.HasValue || value.Value < 0 || double.IsNaN(value.Value))
+                return "—";
+
+            return value.Value.ToString("0");
+        }
+
+        private void StartAutosaveTimer()
+        {
+            _autosaveTimer = new System.Windows.Forms.Timer { Interval = 5000 };
+            _autosaveTimer.Tick += AutosaveTimerTick;
+            _autosaveTimer.Start();
+        }
+
+        private async void AutosaveTimerTick(object? sender, EventArgs e)
+        {
+            SimStateSnapshot? snapshotCopy = null;
+            lock (_snapshotLock)
+            {
+                if (_latestSnapshot != null)
+                    snapshotCopy = _latestSnapshot.Clone();
+            }
+
+            if (snapshotCopy == null)
+                return;
+
+            try
+            {
+                await _snapshotStore.SaveAsync(snapshotCopy.ToFlatDictionary(), CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Autosave] ⚠️ Error guardando snapshot: {ex.Message}");
+            }
+        }
     }
 }
