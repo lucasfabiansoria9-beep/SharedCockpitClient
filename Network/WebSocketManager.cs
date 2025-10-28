@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -18,8 +19,10 @@ namespace SharedCockpitClient.Network
         private readonly WebSocketHost? host;
         private ClientWebSocket? client;
         private CancellationTokenSource? linkedCts;
+        private bool clientConnected;
 
         public event Action<string>? OnMessage;
+        public event Action<string?, Dictionary<string, object?>>? OnStateDiff;
 
         public WebSocketManager(bool isHost, Uri? peer = null, int? portOverride = null)
         {
@@ -38,6 +41,10 @@ namespace SharedCockpitClient.Network
             }
         }
 
+        public bool IsConnected => isHost
+            ? host?.HasClients == true
+            : clientConnected && client?.State == WebSocketState.Open;
+
         public async Task StartAsync(CancellationToken ct)
         {
             if (isHost)
@@ -51,6 +58,7 @@ namespace SharedCockpitClient.Network
             await client.ConnectAsync(peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente."), ct)
                 .ConfigureAwait(false);
             Console.WriteLine($"[WebSocket] Conectado a {peerUri}");
+            clientConnected = true;
             _ = Task.Run(() => ReceiveLoopAsync(client, linkedCts.Token));
         }
 
@@ -95,7 +103,7 @@ namespace SharedCockpitClient.Network
 
             host?.Broadcast(json);
             Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
-            OnMessage?.Invoke(json);
+            DispatchMessage(json);
         }
 
         private static bool TryStampServerTime(string json, out string stamped)
@@ -130,7 +138,10 @@ namespace SharedCockpitClient.Network
                 {
                     result = await ws.ReceiveAsync(new ArraySegment<byte>(buffer), ct).ConfigureAwait(false);
                     if (result.MessageType == WebSocketMessageType.Close)
+                    {
+                        clientConnected = false;
                         return;
+                    }
                     if (result.MessageType != WebSocketMessageType.Text)
                         continue;
 
@@ -141,9 +152,11 @@ namespace SharedCockpitClient.Network
                 if (builder.Length > 0)
                 {
                     var message = MaybeDecompress(builder.ToString());
-                    OnMessage?.Invoke(message);
+                    DispatchMessage(message);
                 }
             }
+
+            clientConnected = false;
         }
 
         private static string MaybeDecompress(string message)
@@ -165,6 +178,78 @@ namespace SharedCockpitClient.Network
             }
         }
 
+        private void DispatchMessage(string json)
+        {
+            OnMessage?.Invoke(json);
+            TryEmitStateDiff(json);
+        }
+
+        private void TryEmitStateDiff(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                if (!root.TryGetProperty("type", out var typeProperty) ||
+                    !string.Equals(typeProperty.GetString(), "state-diff", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                string? role = null;
+                if (root.TryGetProperty("role", out var roleProperty) && roleProperty.ValueKind == JsonValueKind.String)
+                {
+                    role = roleProperty.GetString();
+                }
+
+                if (!root.TryGetProperty("diff", out var diffProperty) || diffProperty.ValueKind != JsonValueKind.Object)
+                    return;
+
+                var diff = ReadDiffDictionary(diffProperty);
+                OnStateDiff?.Invoke(role, diff);
+            }
+            catch (JsonException)
+            {
+                // mensaje no compatible
+            }
+        }
+
+        private static Dictionary<string, object?> ReadDiffDictionary(JsonElement element)
+        {
+            var result = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var property in element.EnumerateObject())
+            {
+                result[property.Name] = ReadJsonValue(property.Value);
+            }
+
+            return result;
+        }
+
+        private static object? ReadJsonValue(JsonElement element)
+        {
+            return element.ValueKind switch
+            {
+                JsonValueKind.String => element.GetString(),
+                JsonValueKind.Number => element.TryGetInt64(out var l) ? l : element.GetDouble(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                JsonValueKind.Object => ReadDiffDictionary(element),
+                JsonValueKind.Array => ReadArray(element),
+                _ => null
+            };
+        }
+
+        private static List<object?> ReadArray(JsonElement element)
+        {
+            var list = new List<object?>();
+            foreach (var item in element.EnumerateArray())
+            {
+                list.Add(ReadJsonValue(item));
+            }
+
+            return list;
+        }
+
         public void Dispose()
         {
             if (isHost)
@@ -179,6 +264,7 @@ namespace SharedCockpitClient.Network
             {
                 try { linkedCts?.Cancel(); } catch { }
                 linkedCts?.Dispose();
+                clientConnected = false;
                 client?.Dispose();
             }
         }

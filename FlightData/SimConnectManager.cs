@@ -255,6 +255,15 @@ namespace SharedCockpitClient.FlightData
                 return _lastSnapshot.Clone();
         }
 
+        public void ApplySimVar(string path, object? value)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            MirrorState(path, value);
+            _ = ApplyRemoteChangeAsync(path, value, CancellationToken.None);
+        }
+
         public void Dispose()
         {
             _collector.Dispose();
