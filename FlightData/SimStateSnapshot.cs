@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Text.RegularExpressions;
 using SharedCockpitClient.Tools;
 
 namespace SharedCockpitClient.FlightData
@@ -8,8 +9,15 @@ namespace SharedCockpitClient.FlightData
     /// <summary>
     /// Representa un snapshot (full o incremental) del estado del simulador con rutas canónicas.
     /// </summary>
-    public sealed class SimStateSnapshot
+    public sealed partial class SimStateSnapshot
     {
+        private static readonly Regex _simVarKeyRegex = SimVarKeyRegex();
+        private static readonly string[] _blockedPrefixes = new[]
+        {
+            "#", "@", "ASOBO_", "XBOX", "Windows.", "Microsoft.", "SharpDX", "Xceed", "Newtonsoft", "Arabic(", "AppHost",
+            "Additional", "alignment", "animation", "args", "ASNAV_", "AS3X_", "AS510_", "AS530_", "AS650_"
+        };
+
         private static readonly IReadOnlyList<string> s_defaultSimVarKeys = BuildDefaultSimVarList();
         private readonly Dictionary<string, object?> _values;
 
@@ -135,20 +143,62 @@ namespace SharedCockpitClient.FlightData
         /// <summary>
         /// Funde un diff dentro de una copia del snapshot actual.
         /// </summary>
+        public void CompactInPlace()
+        {
+            var rm = new List<string>();
+            foreach (var kv in Data)
+            {
+                if (!LooksLikeSimVar(kv.Key))
+                {
+                    rm.Add(kv.Key);
+                    continue;
+                }
+
+                if (kv.Value is null)
+                {
+                    rm.Add(kv.Key);
+                    continue;
+                }
+
+                if (kv.Value is string s && string.IsNullOrWhiteSpace(s))
+                {
+                    rm.Add(kv.Key);
+                }
+            }
+
+            foreach (var k in rm)
+                Data.Remove(k);
+        }
+
         public SimStateSnapshot MergeDiff(SimStateSnapshot diff)
         {
             if (diff == null) throw new ArgumentNullException(nameof(diff));
 
-            var merged = new Dictionary<string, object?>(_values, StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in diff.Values)
+            var merged = Clone();
+            foreach (var kv in diff.Data)
             {
                 if (kv.Value is null)
                     continue;
 
-                merged[kv.Key] = kv.Value;
+                merged.Data[kv.Key] = kv.Value;
             }
 
-            return new SimStateSnapshot(merged, diff.TimestampUtc, false, diff.Sequence);
+            merged.IsDiff = false;
+            return merged;
+        }
+
+        public static bool LooksLikeSimVar(string key)
+        {
+            if (string.IsNullOrWhiteSpace(key))
+                return false;
+
+            foreach (var prefix in _blockedPrefixes)
+            {
+                if (key.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+                    return false;
+            }
+
+            return _simVarKeyRegex.IsMatch(key);
         }
 
         public bool TryGetDouble(string path, out double value)
@@ -805,5 +855,7 @@ namespace SharedCockpitClient.FlightData
             ordered.Sort(StringComparer.OrdinalIgnoreCase);
             return ordered;
         }
+        [GeneratedRegex(@"^[A-Z0-9 _:\-]+$")]
+        private static partial Regex SimVarKeyRegex();
     }
 }

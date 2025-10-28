@@ -76,19 +76,34 @@ namespace SharedCockpitClient.FlightData
         /// </summary>
         public void ApplySnapshot(Dictionary<string, object?> snapshot)
         {
+            if (snapshot == null)
+                return;
+
+            int changedCount = 0;
+
             lock (_state)
             {
                 foreach (var kvp in snapshot)
                 {
+                    if (!SimStateSnapshot.LooksLikeSimVar(kvp.Key))
+                        continue;
+                    if (kvp.Value is null)
+                        continue;
+
                     if (!_state.ContainsKey(kvp.Key) || !Equals(_state[kvp.Key], kvp.Value))
                     {
                         _state[kvp.Key] = kvp.Value;
-                        Console.WriteLine($"[RemoteChange] {kvp.Key} = {kvp.Value}");
+                        changedCount++;
                         OnPropertyChanged?.Invoke(kvp.Key, kvp.Value);
                     }
                 }
 
                 _lastSnapshot = new Dictionary<string, object?>(_state);
+            }
+
+            if (changedCount > 0)
+            {
+                Console.WriteLine($"[RemoteChange] {changedCount} claves aplicadas");
             }
         }
 
