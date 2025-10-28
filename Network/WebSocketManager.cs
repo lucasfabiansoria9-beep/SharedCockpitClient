@@ -5,6 +5,7 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Linq;
 
 namespace SharedCockpitClient.Network
 {
@@ -20,6 +21,11 @@ namespace SharedCockpitClient.Network
         private ClientWebSocket? client;
         private CancellationTokenSource? linkedCts;
         private bool clientConnected;
+        private CancellationTokenSource? pingCts;
+        private readonly Queue<double> rttSamples = new();
+        private readonly object rttLock = new();
+        private double averageRtt;
+        private readonly TaskCompletionSource<bool> readyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public event Action<string>? OnMessage;
         public event Action<string?, Dictionary<string, object?>>? OnStateDiff;
@@ -45,21 +51,48 @@ namespace SharedCockpitClient.Network
             ? host?.HasClients == true
             : clientConnected && client?.State == WebSocketState.Open;
 
+        public double AverageRttMs
+        {
+            get
+            {
+                lock (rttLock)
+                {
+                    return averageRtt;
+                }
+            }
+        }
+
+        public double AverageLagMs => AverageRttMs;
+
+        public Task Ready => readyTcs.Task;
+
         public async Task StartAsync(CancellationToken ct)
         {
             if (isHost)
             {
+                StartPingLoop(ct);
+                readyTcs.TrySetResult(true);
                 await Task.CompletedTask;
                 return;
             }
 
             linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
             client = new ClientWebSocket();
-            await client.ConnectAsync(peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente."), ct)
-                .ConfigureAwait(false);
-            Console.WriteLine($"[WebSocket] Conectado a {peerUri}");
-            clientConnected = true;
-            _ = Task.Run(() => ReceiveLoopAsync(client, linkedCts.Token));
+            try
+            {
+                await client.ConnectAsync(peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente."), ct)
+                    .ConfigureAwait(false);
+                Console.WriteLine($"[WebSocket] Conectado a {peerUri}");
+                clientConnected = true;
+                readyTcs.TrySetResult(true);
+                _ = Task.Run(() => ReceiveLoopAsync(client, linkedCts.Token));
+                StartPingLoop(linkedCts.Token);
+            }
+            catch (Exception ex)
+            {
+                readyTcs.TrySetException(ex);
+                throw;
+            }
         }
 
         public async Task SendAsync(string json)
@@ -90,19 +123,28 @@ namespace SharedCockpitClient.Network
             }
 
             host.Broadcast(json);
-            Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            if (!IsInternalPayload(json))
+            {
+                Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            }
             await Task.CompletedTask;
         }
 
         private void HandleHostMessage(string json)
         {
+            if (TryHandleInternalMessage(json))
+                return;
+
             if (TryStampServerTime(json, out var stamped))
             {
                 json = stamped;
             }
 
             host?.Broadcast(json);
-            Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            if (!IsInternalPayload(json))
+            {
+                Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
+            }
             DispatchMessage(json);
         }
 
@@ -180,8 +222,59 @@ namespace SharedCockpitClient.Network
 
         private void DispatchMessage(string json)
         {
+            if (TryHandleInternalMessage(json))
+                return;
+
             OnMessage?.Invoke(json);
             TryEmitStateDiff(json);
+        }
+
+        private bool TryHandleInternalMessage(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                if (!root.TryGetProperty("type", out var typeProperty))
+                    return false;
+
+                var type = typeProperty.GetString();
+                if (string.Equals(type, "ping", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (root.TryGetProperty("t", out var tProp) && tProp.ValueKind == JsonValueKind.Number)
+                    {
+                        var ticks = tProp.GetInt64();
+                        _ = SendInternalAsync("pong", ticks);
+                    }
+                    return true;
+                }
+
+                if (string.Equals(type, "pong", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (root.TryGetProperty("t", out var tProp) && tProp.ValueKind == JsonValueKind.Number)
+                    {
+                        var ticks = tProp.GetInt64();
+                        try
+                        {
+                            var sentUtc = new DateTime(ticks, DateTimeKind.Utc);
+                            var rtt = (DateTime.UtcNow - sentUtc).TotalMilliseconds;
+                            if (rtt > 0 && rtt < 60000)
+                                RegisterRtt(rtt);
+                        }
+                        catch (ArgumentOutOfRangeException)
+                        {
+                            // ticks inválidos, ignorar
+                        }
+                    }
+                    return true;
+                }
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+
+            return false;
         }
 
         private void TryEmitStateDiff(string json)
@@ -266,6 +359,97 @@ namespace SharedCockpitClient.Network
                 linkedCts?.Dispose();
                 clientConnected = false;
                 client?.Dispose();
+            }
+
+            StopPingLoop();
+        }
+
+        private void StartPingLoop(CancellationToken externalToken)
+        {
+            StopPingLoop();
+            pingCts = CancellationTokenSource.CreateLinkedTokenSource(externalToken);
+            var token = pingCts.Token;
+            _ = Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+                        await SendPingAsync().ConfigureAwait(false);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[WebSocket] ⚠️ Error enviando ping: {ex.Message}");
+                    }
+                }
+            }, token);
+        }
+
+        private void StopPingLoop()
+        {
+            if (pingCts == null)
+                return;
+
+            try { pingCts.Cancel(); } catch { }
+            pingCts.Dispose();
+            pingCts = null;
+        }
+
+        private async Task SendPingAsync()
+        {
+            if (isHost)
+            {
+                if (host?.HasClients != true)
+                    return;
+            }
+            else
+            {
+                if (!IsConnected)
+                    return;
+            }
+
+            var ticks = DateTime.UtcNow.Ticks;
+            await SendInternalAsync("ping", ticks).ConfigureAwait(false);
+        }
+
+        private Task SendInternalAsync(string type, long ticks)
+        {
+            var payload = JsonSerializer.Serialize(new { type, t = ticks });
+            return isHost ? BroadcastAsync(payload) : SendAsync(payload);
+        }
+
+        private void RegisterRtt(double rtt)
+        {
+            lock (rttLock)
+            {
+                rttSamples.Enqueue(rtt);
+                while (rttSamples.Count > 5)
+                    rttSamples.Dequeue();
+
+                averageRtt = rttSamples.Count == 0 ? 0 : rttSamples.Average();
+            }
+        }
+
+        private static bool IsInternalPayload(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                if (!document.RootElement.TryGetProperty("type", out var typeProperty))
+                    return false;
+
+                var type = typeProperty.GetString();
+                return string.Equals(type, "ping", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(type, "pong", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (JsonException)
+            {
+                return false;
             }
         }
     }

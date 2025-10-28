@@ -16,6 +16,8 @@ namespace SharedCockpitClient.Sync
         private readonly object syncLock = new();
         private readonly Queue<(DateTime Timestamp, int Count)> diffSamples = new();
         private double currentDiffRate;
+        private DateTime _firstSnapshotUtc = DateTime.MinValue;
+        private const int WARMUP_MS = 1000;
 
         public RealtimeSyncManager(SimConnectManager simManager, WebSocketManager websocket)
         {
@@ -46,10 +48,28 @@ namespace SharedCockpitClient.Sync
 
             lock (syncLock)
             {
+                if (_firstSnapshotUtc == DateTime.MinValue)
+                    _firstSnapshotUtc = DateTime.UtcNow;
+
+                if (current.IsDiff && lastSnapshot != null)
+                {
+                    current = lastSnapshot.MergeDiff(current);
+                }
+                else
+                {
+                    current = current.Clone();
+                }
+
                 diff = CalculateDiff(lastSnapshot, current);
+                RemoveNullEntries(diff);
                 lastSnapshot = current.Clone();
 
-                if (diff.Count == 0)
+                var elapsedMs = (DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds;
+                var hasLat = current.TryGetDouble("PLANE LATITUDE", out var lat) && Math.Abs(lat) > double.Epsilon;
+                var hasLon = current.TryGetDouble("PLANE LONGITUDE", out var lon) && Math.Abs(lon) > double.Epsilon;
+                var ready = elapsedMs >= WARMUP_MS && simManager.IsConnected && hasLat && hasLon;
+
+                if (!ready || diff.Count == 0)
                     return;
 
                 diffCount = diff.Count;
@@ -74,7 +94,17 @@ namespace SharedCockpitClient.Sync
             if (diff == null || diff.Count == 0)
                 return;
 
-            foreach (var kv in diff)
+            Dictionary<string, object?> diffCopy;
+            lock (syncLock)
+            {
+                if (lastSnapshot == null)
+                    lastSnapshot = new SimStateSnapshot();
+
+                lastSnapshot.ApplyDiff(diff);
+                diffCopy = new Dictionary<string, object?>(diff, StringComparer.OrdinalIgnoreCase);
+            }
+
+            foreach (var kv in diffCopy)
             {
                 simManager.ApplySimVar(kv.Key, kv.Value);
             }
@@ -144,7 +174,7 @@ namespace SharedCockpitClient.Sync
                 keysText += ", …";
             }
 
-            return $"{DateTime.UtcNow:O} {roleTag} {direction} {totalCount} diffs ({keysText})";
+            return $"{roleTag} {direction} {totalCount} diffs ({keysText})";
         }
 
         private static string NormalizeRole(string role)
@@ -164,13 +194,38 @@ namespace SharedCockpitClient.Sync
         }
 
         private static readonly object logLock = new();
+        private static readonly object _consoleLock = new();
+        private static DateTime _lastConsoleLog = DateTime.MinValue;
+        private const bool LOG_TO_CONSOLE = false;
 
-        private static void Log(string text)
+        private static void Log(string text, bool important = false)
         {
+            var line = $"{DateTime.UtcNow:O} {text}";
             lock (logLock)
             {
                 Directory.CreateDirectory("logs");
-                File.AppendAllText(Path.Combine("logs", "realtime-sync.log"), text + Environment.NewLine);
+                File.AppendAllText(Path.Combine("logs", "realtime-sync.log"), line + Environment.NewLine);
+            }
+
+            if (LOG_TO_CONSOLE || important)
+            {
+                lock (_consoleLock)
+                {
+                    if (important || (DateTime.UtcNow - _lastConsoleLog).TotalSeconds >= 1)
+                    {
+                        Console.WriteLine(line);
+                        _lastConsoleLog = DateTime.UtcNow;
+                    }
+                }
+            }
+        }
+
+        private static void RemoveNullEntries(Dictionary<string, object?> diff)
+        {
+            var nullKeys = diff.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList();
+            foreach (var key in nullKeys)
+            {
+                diff.Remove(key);
             }
         }
     }
