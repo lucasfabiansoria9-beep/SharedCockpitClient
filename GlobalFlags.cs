@@ -8,14 +8,24 @@ namespace SharedCockpitClient
     public static class GlobalFlags
     {
         /// <summary>
-        /// Indica si el modo laboratorio está activo.
+        /// Indica si el modo laboratorio está activo (--lab o variable SCC_LAB_PIN).
         /// </summary>
         public static bool IsLabMode { get; private set; } = InitializeLabMode();
 
         /// <summary>
-        /// Rol actual del usuario (PILOT o COPILOT).
+        /// Rol del usuario en la sesión (PILOT / COPILOT).
         /// </summary>
         public static string UserRole { get; set; } = "PILOT";
+
+        /// <summary>
+        /// Rol lógico del nodo (HOST / CLIENT) para WebSocketManager.
+        /// </summary>
+        public static string Role { get; set; } = "HOST";
+
+        /// <summary>
+        /// Dirección IP o host remoto al que se conectará el cliente.
+        /// </summary>
+        public static string PeerAddress { get; set; } = "127.0.0.1";
 
         /// <summary>
         /// Fuerza el modo laboratorio desde código (por ejemplo con --lab).
@@ -26,8 +36,6 @@ namespace SharedCockpitClient
         {
             try
             {
-                // Si existe una variable de entorno que habilita el modo lab, activamos.
-                // (No revelamos ni validamos el valor aquí por seguridad)
                 var pin = Environment.GetEnvironmentVariable("SCC_LAB_PIN");
                 return !string.IsNullOrWhiteSpace(pin);
             }

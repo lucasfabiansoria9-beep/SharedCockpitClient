@@ -1,165 +1,105 @@
 ﻿using System;
-using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using SharedCockpitClient.Network;
-using SharedCockpitClient.FlightData;
 using System.Windows.Forms;
+using SharedCockpitClient.FlightData;
+using SharedCockpitClient.Network;
+using SharedCockpitClient.Persistence;
 
 namespace SharedCockpitClient
 {
+    /// <summary>
+    /// Ventana principal de SharedCockpitClient.
+    /// Orquesta SimConnect, WebSocket, sincronización en tiempo real y persistencia.
+    /// </summary>
     public partial class MainForm : Form
     {
-        private TcpListener server = null!;
-        private TcpClient client = null!;
-        private NetworkStream stream = null!;
-        private CancellationTokenSource cts = null!;
-        private LegacyWebSocketManager wsManager = null!;
-        private SimConnectManager simConnectManager = null!;
-        private AircraftStateManager aircraftState = null!;
-
-        // ---- EVENTOS INICIALIZADOS VACÍOS ----
-        public event Action OnStatusChanged = delegate { };
-        public event Action<byte[]> OnDataReceived = delegate { };
-
-#pragma warning disable CS0414
-        private bool isConnected = false;
-#pragma warning restore CS0414
+        private readonly AircraftStateManager _stateManager = new();
+        private readonly SimConnectManager _simManager;
+        private readonly SnapshotStore _snapshotStore = new();
+        private WebSocketManager? _wsManager;
+        private RealtimeSyncManager? _syncManager;
+        private CancellationTokenSource? _wsCts;
 
         public MainForm()
         {
             InitializeComponent();
+            Load += OnLoad;
+            FormClosing += OnFormClosing;
 
-            btnStop.Enabled = false;
-            txtIp.TextChanged += txtIp_TextChanged!;
-
-            // 🧠 Inicializamos el manejador de estado del avión
-            aircraftState = new AircraftStateManager();
-
-            // ✅ Creamos el SimConnectManager con el stateManager correcto
-            simConnectManager = new SimConnectManager(aircraftState);
+            Console.WriteLine("[MainForm] 🛫 Inicializando cliente compartido...");
+            _simManager = new SimConnectManager(_stateManager);
         }
 
-        private void txtIp_TextChanged(object sender, EventArgs e)
-        {
-            // Reservado para validación de IP o UI futura
-        }
-
-        private async void btnHost_Click(object sender, EventArgs e)
+        private async void OnLoad(object? sender, EventArgs e)
         {
             try
             {
-                cts = new CancellationTokenSource();
-                server = new TcpListener(System.Net.IPAddress.Any, 12345);
-                server.Start();
+                // 1️⃣ Restaurar snapshot previo
+                var previous = await _snapshotStore.LoadAsync(default);
+                foreach (var kv in previous)
+                    _stateManager.Set(kv.Key, kv.Value);
 
-                isConnected = true;
-                UpdateConnectionButtons();
-                UpdateStatus("Servidor iniciado.");
+                // 2️⃣ Determinar rol (HOST / CLIENT)
+                bool isHost = string.Equals(GlobalFlags.Role, "HOST", StringComparison.OrdinalIgnoreCase);
+                Uri? peerUri = null;
 
-               
-
-                // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
-                wsManager = new LegacyWebSocketManager("ws://127.0.0.1:12345", simConnectManager);
-                HookWebSocketEvents();
-                wsManager.Connect();
-            }
-            catch (Exception ex)
-            {
-                UpdateStatus("Error iniciando servidor: " + ex.Message);
-            }
-        }
-
-        private async void btnClient_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                cts = new CancellationTokenSource();
-                client = new TcpClient();
-                await client.ConnectAsync(txtIp.Text, 12345);
-                stream = client.GetStream();
-
-                isConnected = true;
-                UpdateConnectionButtons();
-                UpdateStatus("Cliente conectado al servidor.");
-
-               
-
-                // ✅ Inicializamos WebSocketManager con SimConnectManager y AircraftState
-                wsManager = new LegacyWebSocketManager($"ws://{txtIp.Text}:12345", simConnectManager);
-                HookWebSocketEvents();
-                wsManager.Connect();
-            }
-            catch (Exception ex)
-            {
-                UpdateStatus("Error conectando cliente: " + ex.Message);
-            }
-        }
-
-        private void btnStop_Click(object sender, EventArgs e)
-        {
-            try
-            {
-                cts?.Cancel();
-                wsManager?.Close();
-
-                if (client?.Connected == true)
+                if (!isHost)
                 {
-                    stream.Close();
-                    client.Close();
+                    var peer = GlobalFlags.PeerAddress;
+                    if (!string.IsNullOrWhiteSpace(peer))
+                        peerUri = new Uri($"ws://{peer}:8081");
                 }
 
-                server?.Stop();
+                // 3️⃣ Iniciar WebSocket
+                _wsManager = new WebSocketManager(isHost, peerUri);
+                _wsCts = new CancellationTokenSource();
+                if (!isHost)
+                    _ = _wsManager.StartAsync(_wsCts.Token); // cliente
 
-                isConnected = false;
-                UpdateConnectionButtons();
-                UpdateStatus("Conexión detenida.");
+                // 4️⃣ Iniciar SimConnect
+                _simManager.Start();
+
+                // 5️⃣ Enchufar sincronización en tiempo real
+                _syncManager = new RealtimeSyncManager(_stateManager, _simManager, _wsManager, _snapshotStore);
+                _syncManager.Start();
+
+                Console.WriteLine("[MainForm] ✅ Cliente iniciado correctamente (sincronización RT activa).");
             }
             catch (Exception ex)
             {
-                UpdateStatus("Error deteniendo conexión: " + ex.Message);
+                Console.WriteLine($"[MainForm] ⚠️ Error al iniciar: {ex.Message}");
             }
         }
 
-        private void UpdateStatus(string message)
+        private void OnFormClosing(object? sender, FormClosingEventArgs e)
         {
-            lblStatus.Text = message;
-            OnStatusChanged.Invoke();
+            try
+            {
+                _syncManager?.Dispose();
+                _simManager.Dispose();
+
+                if (_wsManager != null)
+                {
+                    _wsManager.Dispose();
+                }
+
+                try { _wsCts?.Cancel(); } catch { }
+                _wsCts?.Dispose();
+
+                Console.WriteLine("[MainForm] 📴 Cliente cerrado correctamente.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[MainForm] ⚠️ Error al cerrar: {ex.Message}");
+            }
         }
 
-        private void UpdateConnectionButtons()
-        {
-            btnHost.Enabled = !isConnected;
-            btnClient.Enabled = !isConnected;
-            btnStop.Enabled = isConnected;
-        }
-
-        private void HookWebSocketEvents()
-        {
-            if (wsManager == null) return;
-
-            wsManager.OnOpen += () =>
-            {
-                isConnected = true;
-                UpdateConnectionButtons();
-                UpdateStatus("WebSocket abierto.");
-            };
-
-            wsManager.OnMessage += msg => UpdateStatus("Mensaje WS: " + msg);
-
-            wsManager.OnError += err =>
-            {
-                isConnected = false;
-                UpdateConnectionButtons();
-                UpdateStatus("Error WS: " + err);
-            };
-
-            wsManager.OnClose += () =>
-            {
-                isConnected = false;
-                UpdateConnectionButtons();
-                UpdateStatus("WebSocket cerrado.");
-            };
-        }
+        // ====== Handlers requeridos por el Designer ======
+        private void txtIp_TextChanged(object sender, EventArgs e) { }
+        private void btnHost_Click(object sender, EventArgs e) { }
+        private void btnClient_Click(object sender, EventArgs e) { }
+        private void btnStop_Click(object sender, EventArgs e) { }
     }
 }

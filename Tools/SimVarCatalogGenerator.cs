@@ -43,9 +43,7 @@ namespace SharedCockpitClient.Tools
         public static string GenerateJson(bool indented = true)
         {
             if (!TryGetCatalog(out var catalog))
-            {
                 catalog = SimVarCatalog.Empty;
-            }
 
             var payload = new
             {
@@ -69,10 +67,7 @@ namespace SharedCockpitClient.Tools
                 })
             };
 
-            return JsonSerializer.Serialize(payload, new JsonSerializerOptions
-            {
-                WriteIndented = indented
-            });
+            return JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = indented });
         }
 
         private static SimVarCatalog? GenerateInternal()
@@ -82,9 +77,7 @@ namespace SharedCockpitClient.Tools
                 var assembly = Assembly.GetExecutingAssembly();
                 var resourceNames = EmbeddedResourceHelper.ListResources();
                 if (resourceNames.Length == 0)
-                {
                     return SimVarCatalog.Empty;
-                }
 
                 var simVars = new Dictionary<string, SimVarDescriptor>(StringComparer.OrdinalIgnoreCase);
                 var simEvents = new Dictionary<string, SimEventDescriptor>(StringComparer.OrdinalIgnoreCase);
@@ -93,17 +86,12 @@ namespace SharedCockpitClient.Tools
                 {
                     using var stream = assembly.GetManifestResourceStream(resourceName);
                     if (stream is null)
-                    {
                         continue;
-                    }
 
-                    var extension = Path.GetExtension(resourceName);
+                    var extension = Path.GetExtension(resourceName)?.ToLowerInvariant();
                     if (string.IsNullOrEmpty(extension))
-                    {
                         continue;
-                    }
 
-                    extension = extension.ToLowerInvariant();
                     switch (extension)
                     {
                         case ".xml":
@@ -129,33 +117,22 @@ namespace SharedCockpitClient.Tools
         private static void ParseXml(Stream stream, string resourceName, IDictionary<string, SimVarDescriptor> simVars, IDictionary<string, SimEventDescriptor> simEvents)
         {
             XDocument? document;
-            try
-            {
-                document = XDocument.Load(stream);
-            }
-            catch
-            {
-                return;
-            }
+            try { document = XDocument.Load(stream); }
+            catch { return; }
 
             foreach (var element in document.Descendants())
             {
                 var nameAttr = GetAttribute(element, "name");
                 if (string.IsNullOrWhiteSpace(nameAttr))
-                {
                     continue;
-                }
 
                 if (LooksLikeEvent(element))
                 {
                     var eventId = GetAttribute(element, "id") ?? GetAttribute(element, "event") ?? nameAttr;
-                    var category = GetAttribute(element, "category") ?? GuessCategory(resourceName);
-                    var path = $"SimEvents.{eventId}";
-                    if (!simEvents.ContainsKey(path))
-                    {
-                        simEvents[path] = new SimEventDescriptor(path, NormalizeEventName(eventId), category);
-                    }
-
+                    var categoryInner = GetAttribute(element, "category") ?? GuessCategory(resourceName);
+                    var eventPath = $"SimEvents.{eventId}";
+                    if (!simEvents.ContainsKey(eventPath))
+                        simEvents[eventPath] = new SimEventDescriptor(eventPath, NormalizeEventName(eventId), categoryInner);
                     continue;
                 }
 
@@ -167,43 +144,31 @@ namespace SharedCockpitClient.Tools
                 var minDeltaAttr = GetAttribute(element, "mindelta");
 
                 var descriptor = CreateDescriptorFromMetadata(nameAttr, units, typeStr, writableAttr, categoryAttr, eventWrite, minDeltaAttr);
-                var path = descriptor.Path;
-                if (!simVars.ContainsKey(path))
-                {
-                    simVars[path] = descriptor;
-                }
+                var varPath = descriptor.Path;
+                if (!simVars.ContainsKey(varPath))
+                    simVars[varPath] = descriptor;
             }
         }
 
         private static void ParseJson(Stream stream, string resourceName, IDictionary<string, SimVarDescriptor> simVars, IDictionary<string, SimEventDescriptor> simEvents)
         {
             JsonDocument document;
-            try
-            {
-                document = JsonDocument.Parse(stream);
-            }
-            catch
-            {
-                return;
-            }
+            try { document = JsonDocument.Parse(stream); }
+            catch { return; }
 
             using (document)
             {
                 if (document.RootElement.ValueKind == JsonValueKind.Array)
                 {
                     foreach (var element in document.RootElement.EnumerateArray())
-                    {
                         ReadJsonEntry(element, resourceName, simVars, simEvents);
-                    }
                 }
                 else if (document.RootElement.ValueKind == JsonValueKind.Object)
                 {
                     if (document.RootElement.TryGetProperty("SimVars", out var varsElement) && varsElement.ValueKind == JsonValueKind.Array)
                     {
                         foreach (var element in varsElement.EnumerateArray())
-                        {
                             ReadJsonEntry(element, resourceName, simVars, simEvents);
-                        }
                     }
 
                     if (document.RootElement.TryGetProperty("SimEvents", out var eventsElement) && eventsElement.ValueKind == JsonValueKind.Array)
@@ -213,26 +178,20 @@ namespace SharedCockpitClient.Tools
                             var name = element.TryGetProperty("id", out var idProperty) ? idProperty.GetString() : null;
                             name ??= element.TryGetProperty("event", out var eventProperty) ? eventProperty.GetString() : null;
                             if (string.IsNullOrWhiteSpace(name))
-                            {
                                 continue;
-                            }
 
-                            var category = element.TryGetProperty("category", out var categoryProp)
+                            var categoryInner = element.TryGetProperty("category", out var categoryProp)
                                 ? categoryProp.GetString() ?? GuessCategory(resourceName)
                                 : GuessCategory(resourceName);
-                            var path = element.TryGetProperty("path", out var pathProperty) && pathProperty.ValueKind == JsonValueKind.String
+                            var eventPath = element.TryGetProperty("path", out var pathProperty) && pathProperty.ValueKind == JsonValueKind.String
                                 ? pathProperty.GetString()
                                 : $"SimEvents.{name}";
 
-                            if (string.IsNullOrWhiteSpace(path))
-                            {
-                                path = $"SimEvents.{name}";
-                            }
+                            if (string.IsNullOrWhiteSpace(eventPath))
+                                eventPath = $"SimEvents.{name}";
 
-                            if (!simEvents.ContainsKey(path))
-                            {
-                                simEvents[path] = new SimEventDescriptor(path, NormalizeEventName(name), category);
-                            }
+                            if (!simEvents.ContainsKey(eventPath))
+                                simEvents[eventPath] = new SimEventDescriptor(eventPath, NormalizeEventName(name), categoryInner);
                         }
                     }
                 }
@@ -243,30 +202,24 @@ namespace SharedCockpitClient.Tools
         {
             var name = element.TryGetProperty("name", out var nameProperty) ? nameProperty.GetString() : null;
             if (string.IsNullOrWhiteSpace(name))
-            {
                 return;
-            }
 
             if (element.TryGetProperty("event", out var eventProperty) && eventProperty.ValueKind == JsonValueKind.String)
             {
                 var eventId = eventProperty.GetString();
                 if (!string.IsNullOrWhiteSpace(eventId))
                 {
-                    var category = element.TryGetProperty("category", out var categoryProp)
+                    var categoryInner = element.TryGetProperty("category", out var categoryProp)
                         ? categoryProp.GetString() ?? GuessCategory(resourceName)
                         : GuessCategory(resourceName);
-                    var path = element.TryGetProperty("path", out var pathProp) && pathProp.ValueKind == JsonValueKind.String
+                    var eventPath = element.TryGetProperty("path", out var pathProp) && pathProp.ValueKind == JsonValueKind.String
                         ? pathProp.GetString()
                         : $"SimEvents.{name}";
-                    if (string.IsNullOrWhiteSpace(path))
-                    {
-                        path = $"SimEvents.{name}";
-                    }
+                    if (string.IsNullOrWhiteSpace(eventPath))
+                        eventPath = $"SimEvents.{name}";
 
-                    if (!simEvents.ContainsKey(path))
-                    {
-                        simEvents[path] = new SimEventDescriptor(path, NormalizeEventName(eventId!), category);
-                    }
+                    if (!simEvents.ContainsKey(eventPath))
+                        simEvents[eventPath] = new SimEventDescriptor(eventPath, NormalizeEventName(eventId!), categoryInner);
                     return;
                 }
             }
@@ -275,13 +228,17 @@ namespace SharedCockpitClient.Tools
                 ? unitProperty.GetString()
                 : element.TryGetProperty("units", out var unitsProperty) ? unitsProperty.GetString() : string.Empty;
             var type = element.TryGetProperty("type", out var typeProperty) ? typeProperty.GetString() : null;
-            var writableValue = element.TryGetProperty("writable", out var writableProperty) && writableProperty.ValueKind == JsonValueKind.True || (writableProperty.ValueKind == JsonValueKind.String && bool.TryParse(writableProperty.GetString(), out var b) && b);
+            var writableValue = element.TryGetProperty("writable", out var writableProperty) &&
+                (writableProperty.ValueKind == JsonValueKind.True ||
+                 (writableProperty.ValueKind == JsonValueKind.String && bool.TryParse(writableProperty.GetString(), out var boolWritable) && boolWritable));
+
             if (!writableValue && element.TryGetProperty("settable", out var settableProperty))
             {
-                writableValue = settableProperty.ValueKind == JsonValueKind.True || (settableProperty.ValueKind == JsonValueKind.String && bool.TryParse(settableProperty.GetString(), out var b) && b);
+                writableValue = settableProperty.ValueKind == JsonValueKind.True ||
+                    (settableProperty.ValueKind == JsonValueKind.String && bool.TryParse(settableProperty.GetString(), out var boolSettable) && boolSettable);
             }
 
-            var category = element.TryGetProperty("category", out var categoryProperty)
+            var categoryInner2 = element.TryGetProperty("category", out var categoryProperty)
                 ? categoryProperty.GetString() ?? GuessCategory(resourceName)
                 : GuessCategory(resourceName);
             var eventWrite = element.TryGetProperty("eventWrite", out var eventWriteProperty)
@@ -292,48 +249,42 @@ namespace SharedCockpitClient.Tools
                 : (double?)null;
             int? index = null;
             if (element.TryGetProperty("index", out var indexProperty) && indexProperty.ValueKind == JsonValueKind.Number)
-            {
                 index = indexProperty.GetInt32();
-            }
 
             if (element.TryGetProperty("path", out var pathProperty) && pathProperty.ValueKind == JsonValueKind.String)
             {
                 var customPath = pathProperty.GetString();
                 if (!string.IsNullOrWhiteSpace(customPath))
                 {
-                    var descriptor = new SimVarDescriptor(customPath, name!, units ?? string.Empty, ParseDataType(type), writableValue, category, index, eventWrite, minDelta);
+                    var descriptor = new SimVarDescriptor(customPath, name!, units ?? string.Empty, ParseDataType(type), writableValue, categoryInner2, index, eventWrite, minDelta);
                     simVars[descriptor.Path] = descriptor;
                     return;
                 }
             }
 
-            var metadataDescriptor = CreateDescriptorFromMetadata(name!, units ?? string.Empty, type, writableValue ? "true" : null, category, eventWrite, minDelta?.ToString(CultureInfo.InvariantCulture));
+            var metadataDescriptor = CreateDescriptorFromMetadata(name!, units ?? string.Empty, type, writableValue ? "true" : null, categoryInner2, eventWrite, minDelta?.ToString(CultureInfo.InvariantCulture));
             simVars[metadataDescriptor.Path] = metadataDescriptor;
         }
 
         private static void ParseHeader(Stream stream, string resourceName, IDictionary<string, SimEventDescriptor> simEvents)
         {
-            using var reader = new StreamReader(stream, Encoding.UTF8, detectEncodingFromByteOrderMarks: true, leaveOpen: true);
+            using var reader = new StreamReader(stream, Encoding.UTF8, true, leaveOpen: true);
             var content = reader.ReadToEnd();
 
             foreach (Match match in sHeaderEventRegex.Matches(content))
             {
                 var eventName = match.Value;
-                var path = $"SimEvents.{eventName.Replace(':', '_')}";
-                if (!simEvents.ContainsKey(path))
-                {
-                    simEvents[path] = new SimEventDescriptor(path, eventName, GuessCategory(resourceName));
-                }
+                var eventPath = $"SimEvents.{eventName.Replace(':', '_')}";
+                if (!simEvents.ContainsKey(eventPath))
+                    simEvents[eventPath] = new SimEventDescriptor(eventPath, eventName, GuessCategory(resourceName));
             }
 
             foreach (Match match in sHeaderTokenRegex.Matches(content))
             {
                 var token = match.Groups[1].Value;
-                var path = $"SimEvents.{token}";
-                if (!simEvents.ContainsKey(path))
-                {
-                    simEvents[path] = new SimEventDescriptor(path, NormalizeEventName(token), GuessCategory(resourceName));
-                }
+                var tokenPath = $"SimEvents.{token}";
+                if (!simEvents.ContainsKey(tokenPath))
+                    simEvents[tokenPath] = new SimEventDescriptor(tokenPath, NormalizeEventName(token), GuessCategory(resourceName));
             }
         }
 
@@ -350,28 +301,16 @@ namespace SharedCockpitClient.Tools
             return new SimVarDescriptor(descriptorPath, descriptorName, units ?? string.Empty, dataType, canWrite, descriptorCategory, index, eventWrite, delta);
         }
 
-        private static bool ParseBool(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return false;
-            }
+        private static bool ParseBool(string? value) =>
+            !string.IsNullOrWhiteSpace(value) &&
+            (value.Equals("true", StringComparison.OrdinalIgnoreCase) ||
+             value.Equals("1", StringComparison.OrdinalIgnoreCase) ||
+             value.Equals("yes", StringComparison.OrdinalIgnoreCase) ||
+             value.Equals("settable", StringComparison.OrdinalIgnoreCase));
 
-            return value.Equals("true", StringComparison.OrdinalIgnoreCase)
-                || value.Equals("1", StringComparison.OrdinalIgnoreCase)
-                || value.Equals("yes", StringComparison.OrdinalIgnoreCase)
-                || value.Equals("settable", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static double? ParseDouble(string? value)
-        {
-            if (string.IsNullOrWhiteSpace(value))
-            {
-                return null;
-            }
-
-            return double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var result) ? result : null;
-        }
+        private static double? ParseDouble(string? value) =>
+            string.IsNullOrWhiteSpace(value) ? null :
+            double.TryParse(value, NumberStyles.Float, CultureInfo.InvariantCulture, out var result) ? result : null;
 
         private static int? ParseIndex(string name)
         {
@@ -380,20 +319,15 @@ namespace SharedCockpitClient.Tools
             {
                 var segment = name[(colonIndex + 1)..];
                 if (int.TryParse(segment, NumberStyles.Integer, CultureInfo.InvariantCulture, out var value))
-                {
                     return value;
-                }
             }
-
             return null;
         }
 
         private static SimDataType ParseDataType(string? type)
         {
             if (string.IsNullOrWhiteSpace(type))
-            {
                 return SimDataType.Float64;
-            }
 
             return type.Trim().ToUpperInvariant() switch
             {
@@ -408,51 +342,29 @@ namespace SharedCockpitClient.Tools
         private static bool LooksLikeEvent(XElement element)
         {
             var name = element.Name.LocalName;
-            if (name.Contains("event", StringComparison.OrdinalIgnoreCase))
-            {
-                return true;
-            }
-
-            if (element.Attributes().Any(a => a.Name.LocalName.Contains("event", StringComparison.OrdinalIgnoreCase)))
-            {
-                return true;
-            }
-
-            return false;
+            return name.Contains("event", StringComparison.OrdinalIgnoreCase) ||
+                   element.Attributes().Any(a => a.Name.LocalName.Contains("event", StringComparison.OrdinalIgnoreCase));
         }
 
         private static string GuessCategory(string resourceName)
         {
             if (!resourceName.StartsWith(ResourcePrefix, StringComparison.Ordinal))
-            {
                 return "General";
-            }
 
             var trimmed = resourceName[ResourcePrefix.Length..];
             var firstSeparator = trimmed.IndexOf('.');
             if (firstSeparator < 0)
-            {
                 return "General";
-            }
 
             var segment = trimmed[..firstSeparator];
             return string.IsNullOrWhiteSpace(segment) ? "General" : segment;
         }
 
-        private static string NormalizeEventName(string eventId)
-        {
-            if (string.IsNullOrWhiteSpace(eventId))
-            {
-                return eventId;
-            }
+        private static string NormalizeEventName(string eventId) =>
+            string.IsNullOrWhiteSpace(eventId) ? eventId :
+            eventId.StartsWith("K:", StringComparison.OrdinalIgnoreCase) ? eventId : $"K:{eventId}";
 
-            return eventId.StartsWith("K:", StringComparison.OrdinalIgnoreCase) ? eventId : $"K:{eventId}";
-        }
-
-        private static string? GetAttribute(XElement element, string name)
-        {
-            var attribute = element.Attributes().FirstOrDefault(a => a.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase));
-            return attribute?.Value;
-        }
+        private static string? GetAttribute(XElement element, string name) =>
+            element.Attributes().FirstOrDefault(a => a.Name.LocalName.Equals(name, StringComparison.OrdinalIgnoreCase))?.Value;
     }
 }
