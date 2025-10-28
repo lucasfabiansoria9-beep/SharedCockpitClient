@@ -41,10 +41,9 @@ namespace SharedCockpitClient.Sync
             if (current == null) throw new ArgumentNullException(nameof(current));
             role ??= "UNKNOWN";
 
-            Dictionary<string, object?> diff;
-            string payload;
+            string? payload = null;
+            int diffCount = 0;
             string logLine;
-            int diffCount;
 
             lock (syncLock)
             {
@@ -52,25 +51,20 @@ namespace SharedCockpitClient.Sync
                     _firstSnapshotUtc = DateTime.UtcNow;
 
                 if (current.IsDiff && lastSnapshot != null)
-                {
                     current = lastSnapshot.MergeDiff(current);
-                }
                 else
-                {
                     current = current.Clone();
-                }
 
-                diff = CalculateDiff(lastSnapshot, current);
-                RemoveNullEntries(diff);
-                lastSnapshot = current.Clone();
+                var diff = CalculateDiff(lastSnapshot, current);
+                foreach (var key in diff.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList())
+                    diff.Remove(key);
 
-                var elapsedMs = (DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds;
-                var hasLat = current.TryGetDouble("PLANE LATITUDE", out var lat) && Math.Abs(lat) > double.Epsilon;
-                var hasLon = current.TryGetDouble("PLANE LONGITUDE", out var lon) && Math.Abs(lon) > double.Epsilon;
-                var ready = elapsedMs >= WARMUP_MS && simManager.IsConnected && hasLat && hasLon;
-
-                if (!ready || diff.Count == 0)
+                var warmup = (DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds < WARMUP_MS;
+                if (warmup || diff.Count == 0)
+                {
+                    lastSnapshot = current.Clone();
                     return;
+                }
 
                 diffCount = diff.Count;
                 payload = JsonSerializer.Serialize(new
@@ -83,10 +77,14 @@ namespace SharedCockpitClient.Sync
 
                 RecordDiffSample(diffCount);
                 logLine = FormatLogLine(role, "Sent", diff.Keys, diffCount);
+                lastSnapshot = current.Clone();
             }
 
-            _ = websocket.SendAsync(payload);
-            Log(logLine);
+            if (payload != null)
+            {
+                _ = websocket.SendAsync(payload);
+                Log(logLine);
+            }
         }
 
         public void ApplyRemoteDiff(string? role, Dictionary<string, object?> diff)
@@ -94,27 +92,36 @@ namespace SharedCockpitClient.Sync
             if (diff == null || diff.Count == 0)
                 return;
 
-            Dictionary<string, object?> diffCopy;
+            Dictionary<string, object?>? filtered = null;
+            string logLine;
+
             lock (syncLock)
             {
                 if (lastSnapshot == null)
                     lastSnapshot = new SimStateSnapshot();
 
-                lastSnapshot.ApplyDiff(diff);
-                diffCopy = new Dictionary<string, object?>(diff, StringComparer.OrdinalIgnoreCase);
+                filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                foreach (var kv in diff)
+                {
+                    if (!SimStateSnapshot.LooksLikeSimVar(kv.Key))
+                        continue;
+                    if (kv.Value is null)
+                        continue;
+
+                    lastSnapshot.Set(kv.Key, kv.Value);
+                    filtered[kv.Key] = kv.Value;
+                }
+
+                if (filtered.Count == 0)
+                    return;
+
+                RecordDiffSample(filtered.Count);
+                logLine = FormatLogLine(role ?? "REMOTE", "Received", filtered.Keys, filtered.Count);
             }
 
-            foreach (var kv in diffCopy)
+            foreach (var kv in filtered)
             {
                 simManager.ApplySimVar(kv.Key, kv.Value);
-            }
-
-            string logLine;
-            var diffCount = diff.Count;
-            lock (syncLock)
-            {
-                RecordDiffSample(diffCount);
-                logLine = FormatLogLine(role ?? "REMOTE", "Received", diff.Keys, diffCount);
             }
 
             Log(logLine);
@@ -122,19 +129,33 @@ namespace SharedCockpitClient.Sync
 
         private Dictionary<string, object?> CalculateDiff(SimStateSnapshot? previous, SimStateSnapshot current)
         {
+            var diff = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+
             if (previous == null)
             {
-                return new Dictionary<string, object?>(current.Data, StringComparer.OrdinalIgnoreCase);
-            }
+                foreach (var kv in current.Data)
+                {
+                    if (!SimStateSnapshot.LooksLikeSimVar(kv.Key))
+                        continue;
+                    if (kv.Value is null)
+                        continue;
+                    diff[kv.Key] = kv.Value;
+                }
 
-            var diff = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+                return diff;
+            }
 
             foreach (var kv in current.Data)
             {
-                if (!previous.Data.TryGetValue(kv.Key, out var oldValue) || !Equals(oldValue, kv.Value))
-                {
-                    diff[kv.Key] = kv.Value;
-                }
+                if (!SimStateSnapshot.LooksLikeSimVar(kv.Key))
+                    continue;
+
+                var newVal = kv.Value;
+                if (newVal is null)
+                    continue;
+
+                if (!previous.Data.TryGetValue(kv.Key, out var oldValue) || !Equals(oldValue, newVal))
+                    diff[kv.Key] = newVal;
             }
 
             return diff;
@@ -217,15 +238,6 @@ namespace SharedCockpitClient.Sync
                         _lastConsoleLog = DateTime.UtcNow;
                     }
                 }
-            }
-        }
-
-        private static void RemoveNullEntries(Dictionary<string, object?> diff)
-        {
-            var nullKeys = diff.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList();
-            foreach (var key in nullKeys)
-            {
-                diff.Remove(key);
             }
         }
     }

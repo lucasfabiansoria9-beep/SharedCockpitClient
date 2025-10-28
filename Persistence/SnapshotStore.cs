@@ -1,68 +1,80 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.FlightData;
 
 namespace SharedCockpitClient.Persistence
 {
     public sealed class SnapshotStore
     {
-        private readonly string _snapshotPath;
+        private readonly string? _customPath;
+        private DateTime _lastSaveUtc = DateTime.MinValue;
+        private string _lastHash = string.Empty;
 
         public SnapshotStore(string? customPath = null)
         {
-            if (!string.IsNullOrWhiteSpace(customPath))
-            {
-                _snapshotPath = customPath;
-            }
-            else
-            {
-                var baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SharedCockpitClient");
-                Directory.CreateDirectory(baseDir);
-                _snapshotPath = Path.Combine(baseDir, "snapshot.json");
-            }
+            _customPath = string.IsNullOrWhiteSpace(customPath) ? null : customPath;
         }
 
-        public async Task<IDictionary<string, object?>> LoadAsync(CancellationToken ct)
+        public async Task<Dictionary<string, object?>> LoadAsync(CancellationToken ct)
         {
-            if (!File.Exists(_snapshotPath))
-            {
+            var path = GetUserSnapshotPath();
+            if (!File.Exists(path))
                 return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            }
 
-            await using var stream = File.OpenRead(_snapshotPath);
-            var doc = await JsonDocument.ParseAsync(stream, cancellationToken: ct).ConfigureAwait(false);
-            if (!doc.RootElement.TryGetProperty("state", out var stateElement))
-            {
-                return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            }
-
-            var dictionary = JsonSerializer.Deserialize<Dictionary<string, object?>>(stateElement.GetRawText(), new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            }) ?? new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-
-            Console.WriteLine($"[SnapshotStore] Estado restaurado desde {_snapshotPath} ({dictionary.Count} entradas)");
-            return dictionary;
+            var json = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
+            var snap = JsonSerializer.Deserialize<SimStateSnapshot>(json) ?? new SimStateSnapshot();
+            snap.CompactInPlace();
+            Console.WriteLine($"[SnapshotStore] Estado restaurado desde {path} ({snap.Data.Count} entradas)");
+            return new Dictionary<string, object?>(snap.Data, StringComparer.OrdinalIgnoreCase);
         }
 
-        public async Task SaveAsync(IReadOnlyDictionary<string, object?> snapshot, CancellationToken ct)
+        public async Task SaveIfChangedAsync(SimStateSnapshot snap, CancellationToken ct)
         {
-            if (snapshot == null)
+            if (snap == null)
                 return;
 
-            Directory.CreateDirectory(Path.GetDirectoryName(_snapshotPath)!);
-            await using var stream = new FileStream(_snapshotPath, FileMode.Create, FileAccess.Write, FileShare.None);
-            var payload = new
-            {
-                timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
-                state = snapshot
-            };
+            snap.CompactInPlace();
 
-            await JsonSerializer.SerializeAsync(stream, payload, new JsonSerializerOptions { WriteIndented = true }, ct).ConfigureAwait(false);
-            Console.WriteLine($"[SnapshotStore] Estado guardado en {_snapshotPath}");
+            if ((DateTime.UtcNow - _lastSaveUtc).TotalSeconds < 5)
+                return;
+
+            var json = JsonSerializer.Serialize(snap);
+            using var md5 = MD5.Create();
+            var hash = Convert.ToHexString(md5.ComputeHash(Encoding.UTF8.GetBytes(json)));
+            if (hash == _lastHash)
+                return;
+
+            _lastHash = hash;
+            var path = GetUserSnapshotPath();
+            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+            await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
+            _lastSaveUtc = DateTime.UtcNow;
+            Console.WriteLine($"[SnapshotStore] Estado guardado en {path}");
+        }
+
+        public Task SaveAsync(IReadOnlyDictionary<string, object?> snapshot, CancellationToken ct)
+        {
+            if (snapshot == null)
+                return Task.CompletedTask;
+
+            var snap = new SimStateSnapshot(new Dictionary<string, object?>(snapshot, StringComparer.OrdinalIgnoreCase));
+            return SaveIfChangedAsync(snap, ct);
+        }
+
+        private string GetUserSnapshotPath()
+        {
+            if (!string.IsNullOrWhiteSpace(_customPath))
+                return _customPath!;
+
+            var baseDir = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "SharedCockpitClient");
+            Directory.CreateDirectory(baseDir);
+            return Path.Combine(baseDir, "snapshot.json");
         }
     }
 }

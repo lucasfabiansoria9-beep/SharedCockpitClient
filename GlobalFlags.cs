@@ -32,6 +32,11 @@ namespace SharedCockpitClient
         /// </summary>
         public static void ForceLabMode() => IsLabMode = true;
 
+        /// <summary>
+        /// Desactiva explícitamente el modo laboratorio al detectar SimConnect real.
+        /// </summary>
+        public static void DisableLabMode() => IsLabMode = false;
+
         private static bool InitializeLabMode()
         {
             try

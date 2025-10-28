@@ -17,7 +17,8 @@ namespace SharedCockpitClient.Network
     {
         private readonly bool isHost;
         private readonly Uri? peerUri;
-        private readonly WebSocketHost? host;
+        private readonly int? configuredPort;
+        private WebSocketHost? host;
         private ClientWebSocket? client;
         private CancellationTokenSource? linkedCts;
         private bool clientConnected;
@@ -34,17 +35,7 @@ namespace SharedCockpitClient.Network
         {
             this.isHost = isHost;
             peerUri = peer;
-
-            if (isHost)
-            {
-                var listenPort = portOverride ?? peer?.Port ?? 8081;
-                host = new WebSocketHost(listenPort);
-                host.OnMessage += HandleHostMessage;
-                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] Cliente conectado ({id})");
-                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] Cliente desconectado ({id})");
-                host.Start();
-                Console.WriteLine($"[WebSocket] Host escuchando en ws://0.0.0.0:{listenPort}");
-            }
+            configuredPort = portOverride;
         }
 
         public bool IsConnected => isHost
@@ -70,8 +61,28 @@ namespace SharedCockpitClient.Network
         {
             if (isHost)
             {
+                var listenPort = configuredPort ?? peerUri?.Port ?? 8081;
+                host = new WebSocketHost(listenPort);
+                host.OnMessage += HandleHostMessage;
+                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] Cliente conectado ({id})");
+                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] Cliente desconectado ({id})");
+
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        host.Start();
+                        Console.WriteLine($"[WebSocket] Host escuchando en ws://0.0.0.0:{listenPort}");
+                        readyTcs.TrySetResult(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        readyTcs.TrySetException(ex);
+                        Console.WriteLine($"[WebSocket] ❌ Error iniciando host: {ex.Message}");
+                    }
+                }, ct);
+
                 StartPingLoop(ct);
-                readyTcs.TrySetResult(true);
                 await Task.CompletedTask;
                 return;
             }

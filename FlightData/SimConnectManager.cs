@@ -66,10 +66,7 @@ namespace SharedCockpitClient.FlightData
             try
             {
                 _simConnect = new SimConnect("SharedCockpitClient", _windowHandle, 0, null, 0);
-                IsConnected = true;
-                _offlineMode = false;
-                StopOfflineLoop();
-                Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
+                OnSimConnectOpened();
 
                 if (!SimVarCatalogGenerator.TryGetCatalog(out var catalog))
                 {
@@ -109,7 +106,7 @@ namespace SharedCockpitClient.FlightData
                 Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {catalog.SimVars.Count} variables.");
 
                 // 2️⃣ Suscripción a eventos básicos
-                _simConnect.OnRecvOpen += (_, _) => Console.WriteLine("[SimConnect] 🔗 Sesión abierta.");
+                _simConnect.OnRecvOpen += (_, _) => OnSimConnectOpened();
                 _simConnect.OnRecvQuit += (_, _) =>
                 {
                     Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
@@ -177,7 +174,17 @@ namespace SharedCockpitClient.FlightData
                 IsConnected = false;
                 _offlineMode = true;
                 Console.WriteLine("[SimConnect] ⚪ Offline (SimConnect no disponible).");
+                StartOfflineLoop();
             }
+        }
+
+        private void OnSimConnectOpened()
+        {
+            IsConnected = true;
+            _offlineMode = false;
+            StopOfflineLoop();
+            GlobalFlags.DisableLabMode();
+            Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
         }
 
         // Estructura interna de ejemplo (temporal hasta usar catálogo completo)
@@ -291,6 +298,12 @@ namespace SharedCockpitClient.FlightData
             if (string.IsNullOrWhiteSpace(path))
                 return;
 
+            if (!SimStateSnapshot.LooksLikeSimVar(path))
+                return;
+
+            if (value is null)
+                return;
+
             MirrorState(path, value);
             _ = ApplyRemoteChangeAsync(path, value, CancellationToken.None);
         }
@@ -308,6 +321,8 @@ namespace SharedCockpitClient.FlightData
                 return;
 
             StopOfflineLoop();
+            IsConnected = false;
+            _offlineMode = true;
 
             _offlineCts = new CancellationTokenSource();
             var token = _offlineCts.Token;
@@ -318,8 +333,7 @@ namespace SharedCockpitClient.FlightData
                 {
                     try
                     {
-                        var snapshot = new SimStateSnapshot();
-                        snapshot.IsDiff = false;
+                        var snapshot = new SimStateSnapshot { IsDiff = false };
                         LastFps = -1;
                         HandleSnapshot(snapshot, false);
                     }

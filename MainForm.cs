@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Reflection;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -49,6 +50,7 @@ namespace SharedCockpitClient
         {
             try
             {
+                TryRestoreRoleFromSettings();
                 if (!EnsureRoleSelection())
                 {
                     Close();
@@ -154,7 +156,23 @@ namespace SharedCockpitClient
 
         private void HandleStateDiff(string? role, Dictionary<string, object?> diff)
         {
-            _realtimeSync?.ApplyRemoteDiff(role, diff);
+            if (diff == null || diff.Count == 0)
+                return;
+
+            var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kv in diff)
+            {
+                if (!SimStateSnapshot.LooksLikeSimVar(kv.Key))
+                    continue;
+                if (kv.Value is null)
+                    continue;
+                filtered[kv.Key] = kv.Value;
+            }
+
+            if (filtered.Count == 0)
+                return;
+
+            _realtimeSync?.ApplyRemoteDiff(role, filtered);
 
             lock (_snapshotLock)
             {
@@ -163,7 +181,7 @@ namespace SharedCockpitClient
                     _latestSnapshot = new SimStateSnapshot();
                 }
 
-                _latestSnapshot.ApplyDiff(diff);
+                _latestSnapshot.ApplyDiff(filtered);
             }
         }
 
@@ -243,18 +261,19 @@ namespace SharedCockpitClient
             var simState = _simManager?.IsConnected == true ? "🟢" : "⚪ Offline";
             var rate = _realtimeSync?.CurrentDiffRate ?? 0;
             var builder = new StringBuilder();
-            var roleText = string.IsNullOrWhiteSpace(GlobalFlags.Role) ? "—" : GlobalFlags.Role.ToUpperInvariant();
-            builder.AppendLine($"Mode {roleText}");
-            builder.AppendLine($"SIM {simState}");
-            builder.AppendLine($"WS {wsState}");
             builder.AppendLine($"IAS {ias} kt");
             builder.AppendLine($"ALT {alt} ft");
+            builder.AppendLine($"WS {wsState}");
+            builder.AppendLine($"SIM {simState}");
 
             if (_hudDiagnosticsExpanded)
             {
-                builder.AppendLine($"Ping {FormatMs(_wsManager?.AverageRttMs)} ms");
-                builder.AppendLine($"Lag {FormatMs(_wsManager?.AverageLagMs)} ms");
-                builder.AppendLine($"FPS {FormatFps(_simManager?.LastFps)}");
+                var roleText = string.IsNullOrWhiteSpace(GlobalFlags.Role) ? "—" : GlobalFlags.Role.ToUpperInvariant();
+                var ping = _wsManager?.AverageRttMs ?? -1;
+                var fps = _simManager?.LastFps ?? -1;
+                builder.AppendLine($"Role {roleText}");
+                builder.AppendLine($"Ping {(ping < 0 ? "—" : ping.ToString("0"))} ms");
+                builder.AppendLine($"FPS {(fps < 0 ? "—" : fps.ToString("0"))}");
             }
 
             builder.Append($"SyncRate {rate:0.0} diff/s");
@@ -293,6 +312,7 @@ namespace SharedCockpitClient
 
             GlobalFlags.Role = dlg.SelectedRole ?? "HOST";
             GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
+            TryPersistRoleSettings(GlobalFlags.Role, GlobalFlags.PeerAddress);
             return true;
         }
 
@@ -305,22 +325,6 @@ namespace SharedCockpitClient
 
             _hudDiagnosticsExpanded = !_hudDiagnosticsExpanded;
             UpdateHud(this, EventArgs.Empty);
-        }
-
-        private static string FormatMs(double? value)
-        {
-            if (!value.HasValue || value.Value <= 0 || double.IsNaN(value.Value))
-                return "—";
-
-            return value.Value.ToString("0");
-        }
-
-        private static string FormatFps(double? value)
-        {
-            if (!value.HasValue || value.Value < 0 || double.IsNaN(value.Value))
-                return "—";
-
-            return value.Value.ToString("0");
         }
 
         private void StartAutosaveTimer()
@@ -344,11 +348,65 @@ namespace SharedCockpitClient
 
             try
             {
-                await _snapshotStore.SaveAsync(snapshotCopy.ToFlatDictionary(), CancellationToken.None).ConfigureAwait(false);
+                await _snapshotStore.SaveIfChangedAsync(snapshotCopy, CancellationToken.None).ConfigureAwait(false);
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Autosave] ⚠️ Error guardando snapshot: {ex.Message}");
+            }
+        }
+
+        private static void TryRestoreRoleFromSettings()
+        {
+            try
+            {
+                var settingsType = Type.GetType("SharedCockpitClient.Properties.Settings, SharedCockpitClient");
+                if (settingsType == null)
+                    return;
+
+                var defaultProperty = settingsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
+                if (defaultProperty?.GetValue(null) is not object settings)
+                    return;
+
+                var roleProp = settingsType.GetProperty("Role");
+                var peerProp = settingsType.GetProperty("PeerAddress");
+
+                if (roleProp?.GetValue(settings) is string role && !string.IsNullOrWhiteSpace(role))
+                    GlobalFlags.Role = role;
+
+                if (peerProp?.GetValue(settings) is string peer && !string.IsNullOrWhiteSpace(peer))
+                    GlobalFlags.PeerAddress = peer;
+            }
+            catch
+            {
+                // Ignorar si no existe esquema de settings.
+            }
+        }
+
+        private static void TryPersistRoleSettings(string role, string peer)
+        {
+            try
+            {
+                var settingsType = Type.GetType("SharedCockpitClient.Properties.Settings, SharedCockpitClient");
+                if (settingsType == null)
+                    return;
+
+                var defaultProperty = settingsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
+                if (defaultProperty?.GetValue(null) is not object settings)
+                    return;
+
+                var roleProp = settingsType.GetProperty("Role");
+                var peerProp = settingsType.GetProperty("PeerAddress");
+
+                roleProp?.SetValue(settings, role);
+                peerProp?.SetValue(settings, peer);
+
+                var saveMethod = settingsType.GetMethod("Save", BindingFlags.Instance | BindingFlags.Public);
+                saveMethod?.Invoke(settings, null);
+            }
+            catch
+            {
+                // Ignorar si no hay settings persistentes.
             }
         }
     }
