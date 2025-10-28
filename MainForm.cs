@@ -27,7 +27,7 @@ namespace SharedCockpitClient
         private SimStateSnapshot? _latestSnapshot;
         private Panel? _hudPanel;
         private Label? _hudLabel;
-        private Timer? _hudTimer;
+        private System.Windows.Forms.Timer? _hudTimer;   // ✅ corregido
         private bool _hudVisible;
 
         public MainForm()
@@ -192,7 +192,7 @@ namespace SharedCockpitClient
             Controls.Add(_hudPanel);
             _hudPanel.BringToFront();
 
-            _hudTimer = new Timer { Interval = 500 };
+            _hudTimer = new System.Windows.Forms.Timer { Interval = 500 }; // ✅ corregido
             _hudTimer.Tick += UpdateHud;
         }
 

@@ -11,3 +11,12 @@ obj/
 *.exe
 *.dll
 *.json.user
+bin/
+obj/
+logs/
+*.user
+*.suo
+*.log
+*.tmp
+*.cache
+.vs/
