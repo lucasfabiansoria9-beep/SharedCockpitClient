@@ -24,6 +24,7 @@ namespace SharedCockpitClient.FlightData
         private CancellationTokenSource? _offlineCts;
         private Task? _offlineTask;
         private bool _offlineMode;
+        private bool _initialSnapshotQueued;
 
         public event Action<SimStateSnapshot, bool>? OnSnapshot;
 
@@ -126,6 +127,7 @@ namespace SharedCockpitClient.FlightData
                     Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
                     IsConnected = false;
                     _offlineMode = true;
+                    _initialSnapshotQueued = false;
                     StartOfflineLoop();
                 };
                 _simConnect.OnRecvException += (_, ex) =>
@@ -200,6 +202,33 @@ namespace SharedCockpitClient.FlightData
             GlobalFlags.IsLabMode = false;
             LabConsole.StopSafe();
             Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
+
+            if (!_initialSnapshotQueued)
+            {
+                _initialSnapshotQueued = true;
+                _ = EmitInitialSnapshotWithDelayAsync();
+            }
+        }
+
+        private async Task EmitInitialSnapshotWithDelayAsync()
+        {
+            Console.WriteLine("[SimConnect] 🕐 Esperando inicialización de variables...");
+            await Task.Delay(1500).ConfigureAwait(false);
+            EmitInitialSnapshot();
+        }
+
+        private void EmitInitialSnapshot()
+        {
+            var snapshot = _aircraftState.ExportFullSnapshot();
+            if (snapshot.Values != null && snapshot.Values.Count > 0)
+            {
+                OnSnapshot?.Invoke(snapshot, false);
+                Console.WriteLine($"[SimConnect] 📤 Snapshot inicial emitido con {snapshot.Values.Count} variables.");
+            }
+            else
+            {
+                Console.WriteLine("[SimConnect] ⚠️ Snapshot inicial omitido (sin datos)");
+            }
         }
 
         // Estructura interna de ejemplo (temporal hasta usar catálogo completo)

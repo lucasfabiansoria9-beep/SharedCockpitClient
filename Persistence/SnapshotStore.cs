@@ -41,6 +41,12 @@ namespace SharedCockpitClient.Persistence
 
             snap.CompactInPlace();
 
+            if (snap.Values == null || snap.Values.Count == 0)
+            {
+                Console.WriteLine("[SnapshotStore] ⚠️ Snapshot vacío omitido (sin cambios detectados)");
+                return;
+            }
+
             if ((DateTime.UtcNow - _lastSaveUtc).TotalSeconds < 2)
                 return;
 

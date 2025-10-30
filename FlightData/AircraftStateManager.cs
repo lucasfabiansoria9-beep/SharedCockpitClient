@@ -133,5 +133,25 @@ namespace SharedCockpitClient.FlightData
                 }
             }
         }
+
+        public SimStateSnapshot ExportFullSnapshot()
+        {
+            lock (_state)
+            {
+                var snapshot = new SimStateSnapshot();
+                foreach (var kvp in _state)
+                {
+                    if (!SimStateSnapshot.LooksLikeSimVar(kvp.Key))
+                        continue;
+
+                    if (kvp.Value is null)
+                        continue;
+
+                    snapshot.Set(kvp.Key, kvp.Value);
+                }
+
+                return snapshot;
+            }
+        }
     }
 }
