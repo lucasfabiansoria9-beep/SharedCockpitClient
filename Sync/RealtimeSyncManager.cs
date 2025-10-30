@@ -19,6 +19,8 @@ namespace SharedCockpitClient.Sync
         private DateTime _firstSnapshotUtc = DateTime.MinValue;
         private const int WARMUP_MS = 1000;
 
+        public bool IsActive { get; private set; }
+
         public RealtimeSyncManager(SimConnectManager simManager, WebSocketManager websocket)
         {
             this.simManager = simManager ?? throw new ArgumentNullException(nameof(simManager));
@@ -42,8 +44,7 @@ namespace SharedCockpitClient.Sync
             role ??= "UNKNOWN";
 
             string? payload = null;
-            int diffCount = 0;
-            string logLine;
+            string? logLine = null;
 
             lock (syncLock)
             {
@@ -55,35 +56,47 @@ namespace SharedCockpitClient.Sync
                 else
                     current = current.Clone();
 
+                if (!IsActive)
+                {
+                    if ((DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds > WARMUP_MS)
+                    {
+                        IsActive = true;
+                        Console.WriteLine("[RealtimeSync] ✅ Sincronización activada");
+                    }
+                    else
+                    {
+                        lastSnapshot = current.Clone();
+                        return;
+                    }
+                }
+
                 var diff = CalculateDiff(lastSnapshot, current);
                 foreach (var key in diff.Where(kv => kv.Value is null).Select(kv => kv.Key).ToList())
                     diff.Remove(key);
 
-                var warmup = (DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds < WARMUP_MS;
-                if (warmup || diff.Count == 0)
+                if (diff.Count == 0)
                 {
                     lastSnapshot = current.Clone();
                     return;
                 }
 
-                diffCount = diff.Count;
                 payload = JsonSerializer.Serialize(new
                 {
                     type = "state-diff",
                     role,
                     diff,
-                    timestamp = DateTime.UtcNow.Ticks
+                    ts = DateTime.UtcNow.Ticks
                 });
 
-                RecordDiffSample(diffCount);
-                logLine = FormatLogLine(role, "Sent", diff.Keys, diffCount);
+                RecordDiffSample(diff.Count);
+                logLine = FormatLogLine(role, "Sent", diff.Keys, diff.Count);
                 lastSnapshot = current.Clone();
             }
 
             if (payload != null)
             {
                 _ = websocket.SendAsync(payload);
-                Log(logLine);
+                Log(logLine!);
             }
         }
 

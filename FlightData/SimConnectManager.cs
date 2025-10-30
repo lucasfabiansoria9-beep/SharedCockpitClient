@@ -223,6 +223,27 @@ namespace SharedCockpitClient.FlightData
             }
         }
 
+        public async Task WaitForCockpitReadyAsync(int timeoutMs = 15000)
+        {
+            var start = DateTime.UtcNow;
+            while (!IsConnected)
+            {
+                if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
+                    return;
+
+                await Task.Delay(500).ConfigureAwait(false);
+            }
+
+            double alt = 0;
+            do
+            {
+                await Task.Delay(500).ConfigureAwait(false);
+                if (TryGet("PLANE ALTITUDE", out alt) && alt > 1)
+                    break;
+            }
+            while ((DateTime.UtcNow - start).TotalMilliseconds < timeoutMs);
+        }
+
         public Task StopAsync() => _collector.StopAsync();
 
         public Task<bool> ApplyRemoteChangeAsync(string path, object? value, CancellationToken ct)
@@ -295,6 +316,21 @@ namespace SharedCockpitClient.FlightData
         {
             lock (_snapshotLock)
                 return _lastSnapshot.Clone();
+        }
+
+        public bool TryGet(string path, out double value)
+        {
+            lock (_snapshotLock)
+            {
+                if (_lastSnapshot.TryGetDouble(path, out var result))
+                {
+                    value = result;
+                    return true;
+                }
+            }
+
+            value = 0;
+            return false;
         }
 
         public void ApplySimVar(string path, object? value)
