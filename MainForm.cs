@@ -47,7 +47,12 @@ namespace SharedCockpitClient
         {
             try
             {
-                var needRole = string.IsNullOrWhiteSpace(GlobalFlags.Role);
+                bool forceDialog = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
+                bool needRole =
+                    forceDialog ||
+                    string.IsNullOrWhiteSpace(GlobalFlags.Role) ||
+                    GlobalFlags.Role.Equals("none", StringComparison.OrdinalIgnoreCase);
+
                 if (needRole)
                 {
                     using var dlg = new RoleDialog();
@@ -59,6 +64,10 @@ namespace SharedCockpitClient
 
                     GlobalFlags.Role = dlg.SelectedRole;
                     GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
+
+                    Properties.Settings.Default["Role"] = GlobalFlags.Role;
+                    Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress ?? string.Empty;
+                    Properties.Settings.Default.Save();
                 }
 
                 var previous = await _snapshotStore.LoadAsync(default);
@@ -84,10 +93,6 @@ namespace SharedCockpitClient
                 _wsManager.OnStateDiff += HandleStateDiff;
 
                 StartAutosaveTimer();
-
-                Properties.Settings.Default["Role"] = GlobalFlags.Role;
-                Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
-                Properties.Settings.Default.Save();
 
                 Console.WriteLine("[MainForm] ✅ Cliente iniciado correctamente (sincronización RT activa).");
             }
