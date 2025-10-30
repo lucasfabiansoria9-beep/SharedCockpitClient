@@ -40,7 +40,10 @@ namespace SharedCockpitClient.FlightData
 
             if (GlobalFlags.IsLabMode)
             {
-                Console.WriteLine("[SimConnect] 🧪 Modo laboratorio activo (sin conexión real).");
+                if (!IsConnected)
+                {
+                    Console.WriteLine("[SimConnect] 🧪 Modo laboratorio activo (sin conexión real).");
+                }
                 _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
             }
             else
@@ -183,7 +186,8 @@ namespace SharedCockpitClient.FlightData
             IsConnected = true;
             _offlineMode = false;
             StopOfflineLoop();
-            GlobalFlags.DisableLabMode();
+            GlobalFlags.IsLabMode = false;
+            LabConsole.StopSafe();
             Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
         }
 

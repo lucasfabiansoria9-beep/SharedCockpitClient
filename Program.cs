@@ -76,6 +76,7 @@ namespace SharedCockpitClient
                 }
             };
             simManager.Start();
+            var labConsoleRunning = LabConsole.StartIfEnabledAndOffline(simManager);
 
             using var ws = new WebSocketManager(isHost, peerUri);
             await ws.StartAsync(cts.Token).ConfigureAwait(false);
@@ -86,14 +87,20 @@ namespace SharedCockpitClient
 
             Console.WriteLine($"[Boot] LocalInstanceId = {sync.LocalInstanceId}");
 
-            if (GlobalFlags.IsLabMode)
+            if (labConsoleRunning)
             {
-                RunLabLoop(sync, aircraftState, walkaroundSync, cts.Token);
+                using var labLinkedCts = CancellationTokenSource.CreateLinkedTokenSource(cts.Token, LabConsole.CancellationToken);
+                RunLabLoop(sync, aircraftState, walkaroundSync, labLinkedCts.Token);
+
+                if (!cts.Token.IsCancellationRequested && labLinkedCts.Token.IsCancellationRequested && !GlobalFlags.IsLabMode)
+                {
+                    await WaitForExitAsync(cts.Token).ConfigureAwait(false);
+                }
             }
             else
             {
                 Console.WriteLine("[Boot] ℹ️ Integración con MSFS real requerirá ejecutar junto al simulador.");
-                RunLabLoop(sync, aircraftState, walkaroundSync, cts.Token);
+                await WaitForExitAsync(cts.Token).ConfigureAwait(false);
             }
 
             try
@@ -110,10 +117,11 @@ namespace SharedCockpitClient
 
         private static void RunLabLoop(SyncController sync, AircraftStateManager state, WalkaroundSync walkaroundSync, CancellationToken token)
         {
-            Console.WriteLine("Lab Mode activo. Comandos: set <ruta> <valor>, toggle <ruta>, pose <lat> <lon> <alt> <hdg>, state, exit");
-
             while (!token.IsCancellationRequested)
             {
+                if (!LabConsole.IsRunning || !GlobalFlags.IsLabMode)
+                    break;
+
                 Console.Write("> ");
                 var line = Console.ReadLine();
                 if (line is null)
@@ -207,6 +215,17 @@ namespace SharedCockpitClient
                         Console.WriteLine("Comando no reconocido.");
                         break;
                 }
+            }
+        }
+
+        private static async Task WaitForExitAsync(CancellationToken token)
+        {
+            try
+            {
+                await Task.Delay(Timeout.Infinite, token).ConfigureAwait(false);
+            }
+            catch (TaskCanceledException)
+            {
             }
         }
 

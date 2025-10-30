@@ -75,6 +75,7 @@ namespace SharedCockpitClient
 
                 // 4️⃣ Iniciar SimConnect
                 _simManager.Start();
+                LabConsole.StartIfEnabledAndOffline(_simManager);
 
                 // 5️⃣ Enchufar sincronización en tiempo real
                 _realtimeSync = new RealtimeSyncManager(_simManager, _wsManager);

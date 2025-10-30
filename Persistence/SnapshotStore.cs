@@ -55,7 +55,7 @@ namespace SharedCockpitClient.Persistence
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
             _lastSaveUtc = DateTime.UtcNow;
-            Console.WriteLine($"[SnapshotStore] Estado guardado en {path}");
+            Console.WriteLine("[SnapshotStore] ✅ Guardado");
         }
 
         public Task SaveAsync(IReadOnlyDictionary<string, object?> snapshot, CancellationToken ct)
