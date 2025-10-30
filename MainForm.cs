@@ -31,6 +31,7 @@ namespace SharedCockpitClient
         private bool _hudVisible;
         private bool _hudDiagnosticsExpanded;
         private System.Windows.Forms.Timer? _autosaveTimer;
+        private string? _lastHudStatus;
 
         public MainForm()
         {
@@ -47,41 +48,53 @@ namespace SharedCockpitClient
         {
             try
             {
-                using (var dlg = new RoleDialog())
+                if (string.Equals(GlobalFlags.Role, "none", StringComparison.OrdinalIgnoreCase))
                 {
-                    if (dlg.ShowDialog(this) != DialogResult.OK)
-                    {
-                        Application.Exit();
-                        return;
-                    }
-
-                    GlobalFlags.Role = dlg.SelectedRole;
-                    GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
-
-                    if (!string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress))
-                    {
-                        Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
-                        Properties.Settings.Default.Save();
-                    }
+                    MessageBox.Show("Debe seleccionar un rol antes de iniciar la sesión.", "SharedCockpitClient",
+                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Application.Exit();
+                    return;
                 }
 
-                var roleTag = GlobalFlags.Role.Equals("HOST", StringComparison.OrdinalIgnoreCase) ? "host" : "client";
-                var peerTag = roleTag == "client" ? GlobalFlags.PeerAddress : string.Empty;
-                Console.WriteLine("✈️ SharedCockpitClient iniciado");
-                Console.WriteLine($"[Boot] Versión: 5.0 | Role={roleTag} | Peer={peerTag}");
+                Console.WriteLine("──────────────────────────────────────────────");
+                Console.WriteLine("✈️  SharedCockpitClient iniciado");
+                Console.WriteLine($"[Boot] Versión: 6.1 | Role={GlobalFlags.Role} | Room={GlobalFlags.RoomName} | Public={GlobalFlags.IsPublicRoom}");
+                Console.WriteLine("──────────────────────────────────────────────\n");
 
                 var previous = await _snapshotStore.LoadAsync(default);
                 foreach (var kv in previous)
                     _stateManager.Set(kv.Key, kv.Value);
 
-                bool isHost = GlobalFlags.Role.Equals("HOST", StringComparison.OrdinalIgnoreCase);
+                bool isHost = GlobalFlags.Role.Equals("host", StringComparison.OrdinalIgnoreCase);
                 Uri? peerUri = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
                     ? null
                     : new Uri($"ws://{GlobalFlags.PeerAddress}:8081");
 
+                if (isHost)
+                {
+                    var visibility = GlobalFlags.IsPublicRoom ? "Pública" : "Privada";
+                    Console.WriteLine($"[WebSocket] 🛰️ Sala creada: {GlobalFlags.RoomName} ({visibility})");
+                }
+                else
+                {
+                    Console.WriteLine($"[WebSocket] 🔗 Conectando al host {GlobalFlags.PeerAddress}...");
+                }
+
                 _wsManager = new WebSocketManager(isHost, peerUri);
                 _wsCts = new CancellationTokenSource();
-                _ = _wsManager.StartAsync(_wsCts.Token);
+                try
+                {
+                    await _wsManager.StartAsync(_wsCts.Token).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine("[WebSocket] ❌ Error: no se pudo conectar al host.");
+                    Console.WriteLine($"[WebSocket] Detalle: {ex.Message}");
+                    MessageBox.Show("No se pudo conectar al host.", "SharedCockpitClient",
+                        MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    Application.Exit();
+                    return;
+                }
 
                 _simManager.Start();
                 LabConsole.StartIfEnabledAndOffline(_simManager);
@@ -272,8 +285,20 @@ namespace SharedCockpitClient
             var sync = _realtimeSync?.IsActive == true ? "🟢" : "🕓";
             var rate = _realtimeSync?.CurrentDiffRate ?? 0;
 
+            var simConnectState = _simManager?.IsConnected == true ? "Conectado" : "Offline";
+            var hudStatus = $"[HUD] 🧭 Rol activo: {GlobalFlags.Role} | Sala: {GlobalFlags.RoomName} | MSFS: {simConnectState}";
+            if (!string.Equals(_lastHudStatus, hudStatus, StringComparison.Ordinal))
+            {
+                Console.WriteLine(hudStatus);
+                _lastHudStatus = hudStatus;
+            }
+
+            var roleLabel = string.IsNullOrWhiteSpace(GlobalFlags.RoomName)
+                ? $"ROL {GlobalFlags.Role}"
+                : $"ROL {GlobalFlags.Role} | SALA {GlobalFlags.RoomName}";
+
             _hudLabel.Text =
-                $"IAS {ias} kt\nALT {alt} ft\nSIM {simState}\nWS {wsState}\n" +
+                $"{roleLabel}\nIAS {ias} kt\nALT {alt} ft\nSIM {simState}\nWS {wsState}\n" +
                 $"Ping {(ping < 0 ? "—" : ping.ToString("0"))} ms\nFPS {(fps < 0 ? "—" : fps.ToString("0"))}\n" +
                 $"Sync {sync}\nDiffRate {rate:0.0}/s";
 

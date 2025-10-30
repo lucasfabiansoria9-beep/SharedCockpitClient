@@ -5,24 +5,74 @@ namespace SharedCockpitClient
 {
     public partial class RoleDialog : Form
     {
-        public string SelectedRole => rbHost.Checked ? "HOST" : "CLIENT";
-        public string? PeerIp => txtPeerIp.Visible ? txtPeerIp.Text.Trim() : null;
-
         public RoleDialog()
         {
             InitializeComponent();
-            rbHost.CheckedChanged += (_, __) => txtPeerIp.Visible = !rbHost.Checked;
-            txtPeerIp.Text = GlobalFlags.PeerAddress ?? string.Empty;
+
+            rbHost.CheckedChanged += (_, __) => UpdatePeerVisibility();
+            rbClient.CheckedChanged += (_, __) => UpdatePeerVisibility();
+
+            if (string.Equals(GlobalFlags.Role, "client", StringComparison.OrdinalIgnoreCase))
+            {
+                rbClient.Checked = true;
+            }
+
+            txtPeerAddress.Text = GlobalFlags.PeerAddress ?? string.Empty;
+            txtRoomName.Text = GlobalFlags.RoomName ?? string.Empty;
+            chkPublic.Checked = GlobalFlags.IsPublicRoom;
+
+            UpdatePeerVisibility();
+        }
+
+        private void UpdatePeerVisibility()
+        {
+            var isClient = rbClient.Checked;
+            txtPeerAddress.Visible = isClient;
+            lblPeer.Visible = isClient;
+
+            if (isClient)
+            {
+                txtPeerAddress.Focus();
+                txtPeerAddress.SelectAll();
+            }
         }
 
         private void btnOK_Click(object sender, EventArgs e)
         {
-            if (rbClient.Checked && string.IsNullOrWhiteSpace(txtPeerIp.Text))
+            var role = rbHost.Checked ? "host" : rbClient.Checked ? "client" : null;
+            if (string.IsNullOrEmpty(role))
             {
-                MessageBox.Show("Ingrese la IP o nombre del host.", "SharedCockpitClient",
+                MessageBox.Show("Seleccione un rol.", "SharedCockpitClient",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 DialogResult = DialogResult.None;
+                return;
             }
+
+            var roomName = txtRoomName.Text.Trim();
+            if (string.IsNullOrWhiteSpace(roomName))
+            {
+                MessageBox.Show("Ingrese un nombre de sala.", "SharedCockpitClient",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            var peer = txtPeerAddress.Text.Trim();
+            if (role == "client" && string.IsNullOrWhiteSpace(peer))
+            {
+                MessageBox.Show("Ingrese dirección del host.", "SharedCockpitClient",
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                DialogResult = DialogResult.None;
+                return;
+            }
+
+            GlobalFlags.Role = role;
+            GlobalFlags.RoomName = roomName;
+            GlobalFlags.IsPublicRoom = chkPublic.Checked;
+            GlobalFlags.PeerAddress = peer;
+
+            Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
+            Properties.Settings.Default.Save();
         }
     }
 }
