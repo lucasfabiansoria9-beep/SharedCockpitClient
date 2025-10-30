@@ -64,7 +64,10 @@ namespace SharedCockpitClient.Utils
             yield return executing;
 
             if (!GlobalFlags.EnableAssemblyScanCatalog)
+            {
+                // Catálogo deshabilitado por defecto para evitar reflejar assemblies externos
                 yield break;
+            }
 
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
@@ -96,11 +99,11 @@ namespace SharedCockpitClient.Utils
                 return true;
             if (name.StartsWith("Microsoft.WindowsAPICodePack", StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (name.StartsWith("Newtonsoft.Json", StringComparison.OrdinalIgnoreCase))
-                return false;
             if (name.StartsWith("SharpDX", StringComparison.OrdinalIgnoreCase))
                 return false;
-            if (name.StartsWith("Xceed.Wpf.Toolkit", StringComparison.OrdinalIgnoreCase))
+            if (name.StartsWith("Xceed", StringComparison.OrdinalIgnoreCase))
+                return false;
+            if (name.StartsWith("Newtonsoft", StringComparison.OrdinalIgnoreCase))
                 return false;
             return false;
         }

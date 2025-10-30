@@ -78,6 +78,9 @@ namespace SharedCockpitClient.FlightData
                 }
 
                 // 1️⃣ Crear una definición de datos unificada
+                var registeredCount = 0;
+                var hadScanErrors = false;
+
                 foreach (var simVar in catalog.SimVars)
                 {
                     try
@@ -97,16 +100,24 @@ namespace SharedCockpitClient.FlightData
                             0.0f,
                             SimConnect.SIMCONNECT_UNUSED
                         );
+                        registeredCount++;
                     }
-                    catch (Exception ex)
+                    catch (Exception)
                     {
-                        Console.WriteLine($"[SimConnect] ⚠️ Error registrando {simVar.Name}: {ex.Message}");
+                        hadScanErrors = true;
                     }
                 }
 
                 _simConnect.RegisterDataDefineStruct<SnapshotStruct>(DEFINITIONS.SnapshotStruct);
 
-                Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {catalog.SimVars.Count} variables.");
+                if (hadScanErrors)
+                {
+                    Console.WriteLine("[SimConnect] ℹ️ Catálogo parcial cargado (algunas entradas fueron ignoradas por seguridad).");
+                }
+                else
+                {
+                    Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {registeredCount} variables.");
+                }
 
                 // 2️⃣ Suscripción a eventos básicos
                 _simConnect.OnRecvOpen += (_, _) => OnSimConnectOpened();
@@ -226,22 +237,31 @@ namespace SharedCockpitClient.FlightData
         public async Task WaitForCockpitReadyAsync(int timeoutMs = 15000)
         {
             var start = DateTime.UtcNow;
+
             while (!IsConnected)
             {
                 if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
-                    return;
+                    break;
 
-                await Task.Delay(500).ConfigureAwait(false);
+                Console.WriteLine("[SimConnect] ⏳ Esperando MSFS...");
+                await Task.Delay(1000).ConfigureAwait(false);
             }
 
-            double alt = 0;
+            double altFeet;
             do
             {
-                await Task.Delay(500).ConfigureAwait(false);
-                if (TryGet("PLANE ALTITUDE", out alt) && alt > 1)
+                if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
                     break;
+
+                altFeet = 0;
+                if (TryGet("PLANE ALTITUDE", out altFeet) && altFeet > 1)
+                    break;
+
+                await Task.Delay(500).ConfigureAwait(false);
             }
-            while ((DateTime.UtcNow - start).TotalMilliseconds < timeoutMs);
+            while (true);
+
+            Console.WriteLine("[SimConnect] 🛫 Cabina lista.");
         }
 
         public Task StopAsync() => _collector.StopAsync();

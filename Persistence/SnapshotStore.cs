@@ -41,7 +41,7 @@ namespace SharedCockpitClient.Persistence
 
             snap.CompactInPlace();
 
-            if ((DateTime.UtcNow - _lastSaveUtc).TotalSeconds < 5)
+            if ((DateTime.UtcNow - _lastSaveUtc).TotalSeconds < 2)
                 return;
 
             var json = JsonSerializer.Serialize(snap);
