@@ -10,7 +10,6 @@ namespace SharedCockpitClient.Properties
         private static readonly Settings _default = new();
         private readonly Dictionary<string, string> _values = new(StringComparer.OrdinalIgnoreCase)
         {
-            ["Role"] = string.Empty,
             ["PeerAddress"] = string.Empty
         };
 

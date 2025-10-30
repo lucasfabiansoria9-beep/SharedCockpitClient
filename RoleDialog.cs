@@ -12,6 +12,7 @@ namespace SharedCockpitClient
         {
             InitializeComponent();
             rbHost.CheckedChanged += (_, __) => txtPeerIp.Visible = !rbHost.Checked;
+            txtPeerIp.Text = GlobalFlags.PeerAddress ?? string.Empty;
         }
 
         private void btnOK_Click(object sender, EventArgs e)

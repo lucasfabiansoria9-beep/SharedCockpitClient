@@ -47,28 +47,28 @@ namespace SharedCockpitClient
         {
             try
             {
-                bool forceDialog = (Control.ModifierKeys & Keys.Shift) == Keys.Shift;
-                bool needRole =
-                    forceDialog ||
-                    string.IsNullOrWhiteSpace(GlobalFlags.Role) ||
-                    GlobalFlags.Role.Equals("none", StringComparison.OrdinalIgnoreCase);
-
-                if (needRole)
+                using (var dlg = new RoleDialog())
                 {
-                    using var dlg = new RoleDialog();
                     if (dlg.ShowDialog(this) != DialogResult.OK)
                     {
-                        Close();
+                        Application.Exit();
                         return;
                     }
 
                     GlobalFlags.Role = dlg.SelectedRole;
                     GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
 
-                    Properties.Settings.Default["Role"] = GlobalFlags.Role;
-                    Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress ?? string.Empty;
-                    Properties.Settings.Default.Save();
+                    if (!string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress))
+                    {
+                        Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
+                        Properties.Settings.Default.Save();
+                    }
                 }
+
+                var roleTag = GlobalFlags.Role.Equals("HOST", StringComparison.OrdinalIgnoreCase) ? "host" : "client";
+                var peerTag = roleTag == "client" ? GlobalFlags.PeerAddress : string.Empty;
+                Console.WriteLine("✈️ SharedCockpitClient iniciado");
+                Console.WriteLine($"[Boot] Versión: 5.0 | Role={roleTag} | Peer={peerTag}");
 
                 var previous = await _snapshotStore.LoadAsync(default);
                 foreach (var kv in previous)
