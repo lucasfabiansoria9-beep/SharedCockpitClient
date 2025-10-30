@@ -14,6 +14,9 @@ namespace SharedCockpitClient
     {
         static async Task Main(string[] args)
         {
+            GlobalFlags.Role = Properties.Settings.Default["Role"]?.ToString() ?? string.Empty;
+            GlobalFlags.PeerAddress = Properties.Settings.Default["PeerAddress"]?.ToString() ?? string.Empty;
+
             Console.OutputEncoding = System.Text.Encoding.UTF8;
             Console.Title = "SharedCockpitClient";
 

@@ -1,8 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
-using System.Reflection;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -10,7 +8,6 @@ using SharedCockpitClient.FlightData;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Persistence;
 using SharedCockpitClient.Sync;
-using SharedCockpitClient.UI;
 
 namespace SharedCockpitClient
 {
@@ -50,39 +47,47 @@ namespace SharedCockpitClient
         {
             try
             {
-                TryRestoreRoleFromSettings();
-                if (!EnsureRoleSelection())
+                var needRole = string.IsNullOrWhiteSpace(GlobalFlags.Role);
+                if (needRole)
                 {
-                    Close();
-                    return;
+                    using var dlg = new RoleDialog();
+                    if (dlg.ShowDialog(this) != DialogResult.OK)
+                    {
+                        Close();
+                        return;
+                    }
+
+                    GlobalFlags.Role = dlg.SelectedRole;
+                    GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
                 }
 
-                // 1️⃣ Restaurar snapshot previo
                 var previous = await _snapshotStore.LoadAsync(default);
                 foreach (var kv in previous)
                     _stateManager.Set(kv.Key, kv.Value);
 
-                // 2️⃣ Determinar rol (HOST / CLIENT)
-                bool isHost = string.Equals(GlobalFlags.Role, "HOST", StringComparison.OrdinalIgnoreCase);
+                bool isHost = GlobalFlags.Role.Equals("HOST", StringComparison.OrdinalIgnoreCase);
                 Uri? peerUri = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
                     ? null
                     : new Uri($"ws://{GlobalFlags.PeerAddress}:8081");
 
-                // 3️⃣ Iniciar WebSocket
                 _wsManager = new WebSocketManager(isHost, peerUri);
                 _wsCts = new CancellationTokenSource();
                 _ = _wsManager.StartAsync(_wsCts.Token);
 
-                // 4️⃣ Iniciar SimConnect
                 _simManager.Start();
                 LabConsole.StartIfEnabledAndOffline(_simManager);
+                await _simManager.WaitForCockpitReadyAsync();
+                Console.WriteLine("[Boot] 🧩 Cabina lista, activando sincronización RT...");
 
-                // 5️⃣ Enchufar sincronización en tiempo real
                 _realtimeSync = new RealtimeSyncManager(_simManager, _wsManager);
                 _simManager.OnSnapshot += HandleSimSnapshot;
                 _wsManager.OnStateDiff += HandleStateDiff;
 
                 StartAutosaveTimer();
+
+                Properties.Settings.Default["Role"] = GlobalFlags.Role;
+                Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
+                Properties.Settings.Default.Save();
 
                 Console.WriteLine("[MainForm] ✅ Cliente iniciado correctamente (sincronización RT activa).");
             }
@@ -248,38 +253,25 @@ namespace SharedCockpitClient
                     snapshotCopy = _latestSnapshot.Clone();
             }
 
-            string ias = "—";
-            string alt = "—";
-            if (snapshotCopy != null)
-            {
-                if (snapshotCopy.TryGetDouble("AIRSPEED INDICATED", out var iasValue))
-                    ias = iasValue.ToString("0");
-                if (snapshotCopy.TryGetDouble("PLANE ALTITUDE", out var altValue))
-                    alt = altValue.ToString("0");
-            }
+            string ias = "--";
+            string alt = "--";
+            if (snapshotCopy?.TryGetDouble("AIRSPEED INDICATED", out var iasVal) == true)
+                ias = iasVal.ToString("0");
+            if (snapshotCopy?.TryGetDouble("PLANE ALTITUDE", out var altVal) == true)
+                alt = altVal.ToString("0");
 
             var wsState = _wsManager?.IsConnected == true ? "🟢" : "🔴";
-            var simState = _simManager?.IsConnected == true ? "🟢" : "⚪ Offline";
+            var simState = _simManager?.IsConnected == true ? "🟢" : "⚪";
+            var ping = _wsManager?.AverageRttMs ?? -1;
+            var fps = _simManager?.LastFps ?? -1;
+            var sync = _realtimeSync?.IsActive == true ? "🟢" : "🕓";
             var rate = _realtimeSync?.CurrentDiffRate ?? 0;
-            var builder = new StringBuilder();
-            builder.AppendLine($"IAS {ias} kt");
-            builder.AppendLine($"ALT {alt} ft");
-            builder.AppendLine($"WS {wsState}");
-            builder.AppendLine($"SIM {simState}");
 
-            if (_hudDiagnosticsExpanded)
-            {
-                var roleText = string.IsNullOrWhiteSpace(GlobalFlags.Role) ? "—" : GlobalFlags.Role.ToUpperInvariant();
-                var ping = _wsManager?.AverageRttMs ?? -1;
-                var fps = _simManager?.LastFps ?? -1;
-                builder.AppendLine($"Role {roleText}");
-                builder.AppendLine($"Ping {(ping < 0 ? "—" : ping.ToString("0"))} ms");
-                builder.AppendLine($"FPS {(fps < 0 ? "—" : fps.ToString("0"))}");
-            }
+            _hudLabel.Text =
+                $"IAS {ias} kt\nALT {alt} ft\nSIM {simState}\nWS {wsState}\n" +
+                $"Ping {(ping < 0 ? "—" : ping.ToString("0"))} ms\nFPS {(fps < 0 ? "—" : fps.ToString("0"))}\n" +
+                $"Sync {sync}\nDiffRate {rate:0.0}/s";
 
-            builder.Append($"SyncRate {rate:0.0} diff/s");
-
-            _hudLabel.Text = builder.ToString();
             PositionHud();
         }
 
@@ -299,23 +291,6 @@ namespace SharedCockpitClient
         private void btnHost_Click(object sender, EventArgs e) { }
         private void btnClient_Click(object sender, EventArgs e) { }
         private void btnStop_Click(object sender, EventArgs e) { }
-
-        private bool EnsureRoleSelection()
-        {
-            var needRole = string.IsNullOrWhiteSpace(GlobalFlags.Role) || Control.ModifierKeys.HasFlag(Keys.F2);
-            if (!needRole)
-                return true;
-
-            using var dlg = new RoleDialog();
-            var result = dlg.ShowDialog(this);
-            if (result != DialogResult.OK)
-                return false;
-
-            GlobalFlags.Role = dlg.SelectedRole ?? "HOST";
-            GlobalFlags.PeerAddress = dlg.PeerIp ?? string.Empty;
-            TryPersistRoleSettings(GlobalFlags.Role, GlobalFlags.PeerAddress);
-            return true;
-        }
 
         private void ToggleHudDiagnostics()
         {
@@ -357,58 +332,5 @@ namespace SharedCockpitClient
             }
         }
 
-        private static void TryRestoreRoleFromSettings()
-        {
-            try
-            {
-                var settingsType = Type.GetType("SharedCockpitClient.Properties.Settings, SharedCockpitClient");
-                if (settingsType == null)
-                    return;
-
-                var defaultProperty = settingsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
-                if (defaultProperty?.GetValue(null) is not object settings)
-                    return;
-
-                var roleProp = settingsType.GetProperty("Role");
-                var peerProp = settingsType.GetProperty("PeerAddress");
-
-                if (roleProp?.GetValue(settings) is string role && !string.IsNullOrWhiteSpace(role))
-                    GlobalFlags.Role = role;
-
-                if (peerProp?.GetValue(settings) is string peer && !string.IsNullOrWhiteSpace(peer))
-                    GlobalFlags.PeerAddress = peer;
-            }
-            catch
-            {
-                // Ignorar si no existe esquema de settings.
-            }
-        }
-
-        private static void TryPersistRoleSettings(string role, string peer)
-        {
-            try
-            {
-                var settingsType = Type.GetType("SharedCockpitClient.Properties.Settings, SharedCockpitClient");
-                if (settingsType == null)
-                    return;
-
-                var defaultProperty = settingsType.GetProperty("Default", BindingFlags.Public | BindingFlags.Static);
-                if (defaultProperty?.GetValue(null) is not object settings)
-                    return;
-
-                var roleProp = settingsType.GetProperty("Role");
-                var peerProp = settingsType.GetProperty("PeerAddress");
-
-                roleProp?.SetValue(settings, role);
-                peerProp?.SetValue(settings, peer);
-
-                var saveMethod = settingsType.GetMethod("Save", BindingFlags.Instance | BindingFlags.Public);
-                saveMethod?.Invoke(settings, null);
-            }
-            catch
-            {
-                // Ignorar si no hay settings persistentes.
-            }
-        }
     }
 }
