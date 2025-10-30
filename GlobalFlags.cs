@@ -23,9 +23,19 @@ namespace SharedCockpitClient
         public static string Role = "none";
 
         /// <summary>
+        /// Nombre de la sala seleccionada.
+        /// </summary>
+        public static string RoomName = string.Empty;
+
+        /// <summary>
+        /// Indica si la sala es pública.
+        /// </summary>
+        public static bool IsPublicRoom = false;
+
+        /// <summary>
         /// Dirección IP o host remoto al que se conectará el cliente.
         /// </summary>
-        public static string PeerAddress { get; set; } = string.Empty;
+        public static string PeerAddress = string.Empty;
 
         /// <summary>
         /// Rol del usuario en la sesión (PILOT / COPILOT).

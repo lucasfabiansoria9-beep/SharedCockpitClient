@@ -25,6 +25,7 @@ namespace SharedCockpitClient.FlightData
         private Task? _offlineTask;
         private bool _offlineMode;
         private bool _initialSnapshotQueued;
+        private readonly Dictionary<string, object?> lastValues = new(StringComparer.OrdinalIgnoreCase);
 
         public event Action<SimStateSnapshot, bool>? OnSnapshot;
 
@@ -138,21 +139,7 @@ namespace SharedCockpitClient.FlightData
                 {
                     try
                     {
-                        var s = (SnapshotStruct)data.dwData[0];
-                        var snapshot = new SimStateSnapshot();
-
-                        snapshot.Set("SimVars.Altitude", s.Altitude);
-                        snapshot.Set("SimVars.Airspeed", s.Airspeed);
-                        snapshot.Set("SimVars.Heading", s.Heading);
-                        snapshot.Set("SimVars.Pitch", s.Pitch);
-                        snapshot.Set("SimVars.Bank", s.Bank);
-
-                        lock (_snapshotLock)
-                            _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
-
-                        _aircraftState.ApplySnapshot(snapshot.ToFlatDictionary());
-                        OnSnapshot?.Invoke(snapshot, true);
-                        Console.WriteLine($"[SimConnect] 📡 Snapshot actualizado.");
+                        OnRecvSimobjectData(data);
                     }
                     catch (Exception ex)
                     {
@@ -202,12 +189,54 @@ namespace SharedCockpitClient.FlightData
             GlobalFlags.IsLabMode = false;
             LabConsole.StopSafe();
             Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
+            lastValues.Clear();
 
             if (!_initialSnapshotQueued)
             {
                 _initialSnapshotQueued = true;
                 _ = EmitInitialSnapshotWithDelayAsync();
             }
+        }
+
+        private void OnRecvSimobjectData(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        {
+            var changed = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var kvp in ExtractVars(data))
+            {
+                if (!lastValues.ContainsKey(kvp.Key) || !Equals(lastValues[kvp.Key], kvp.Value))
+                {
+                    lastValues[kvp.Key] = kvp.Value;
+                    changed[kvp.Key] = kvp.Value;
+                }
+            }
+
+            if (changed.Count == 0)
+            {
+                return;
+            }
+
+            var snapshot = new SimStateSnapshot(changed, DateTime.UtcNow, true);
+
+            lock (_snapshotLock)
+                _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
+
+            _aircraftState.ApplySnapshot(snapshot.ToFlatDictionary());
+            OnSnapshot?.Invoke(snapshot, true);
+        }
+
+        private static IEnumerable<KeyValuePair<string, object?>> ExtractVars(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        {
+            if (data.dwData == null || data.dwData.Length == 0)
+            {
+                yield break;
+            }
+
+            var snapshot = (SnapshotStruct)data.dwData[0];
+            yield return new KeyValuePair<string, object?>("SimVars.Altitude", snapshot.Altitude);
+            yield return new KeyValuePair<string, object?>("SimVars.Airspeed", snapshot.Airspeed);
+            yield return new KeyValuePair<string, object?>("SimVars.Heading", snapshot.Heading);
+            yield return new KeyValuePair<string, object?>("SimVars.Pitch", snapshot.Pitch);
+            yield return new KeyValuePair<string, object?>("SimVars.Bank", snapshot.Bank);
         }
 
         private async Task EmitInitialSnapshotWithDelayAsync()
