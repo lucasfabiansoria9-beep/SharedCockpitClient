@@ -10,7 +10,12 @@ namespace SharedCockpitClient
         /// <summary>
         /// Indica si el modo laboratorio está activo (--lab o variable SCC_LAB_PIN).
         /// </summary>
-        public static bool IsLabMode { get; private set; } = InitializeLabMode();
+        public static bool IsLabMode { get; internal set; } = InitializeLabMode();
+
+        /// <summary>
+        /// Habilita el escaneo dinámico de ensamblados para el catálogo embebido.
+        /// </summary>
+        public static bool EnableAssemblyScanCatalog { get; set; } = false;
 
         /// <summary>
         /// Rol lógico del nodo (HOST / CLIENT) para WebSocketManager.

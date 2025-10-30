@@ -60,8 +60,17 @@ namespace SharedCockpitClient.Utils
 
         private static IEnumerable<Assembly> EnumerateAssemblies()
         {
+            var executing = Assembly.GetExecutingAssembly();
+            yield return executing;
+
+            if (!GlobalFlags.EnableAssemblyScanCatalog)
+                yield break;
+
             foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
             {
+                if (assembly == null || ReferenceEquals(assembly, executing))
+                    continue;
+
                 Assembly? target = null;
                 try
                 {
