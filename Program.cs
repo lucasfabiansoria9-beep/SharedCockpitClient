@@ -14,12 +14,6 @@ namespace SharedCockpitClient
     {
         static async Task Main(string[] args)
         {
-            GlobalFlags.Role = Properties.Settings.Default["Role"]?.ToString() ?? "none";
-            if (string.IsNullOrWhiteSpace(GlobalFlags.Role))
-            {
-                GlobalFlags.Role = "none";
-            }
-
             GlobalFlags.PeerAddress = Properties.Settings.Default["PeerAddress"]?.ToString() ?? string.Empty;
 
             Console.OutputEncoding = System.Text.Encoding.UTF8;

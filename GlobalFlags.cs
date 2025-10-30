@@ -20,7 +20,7 @@ namespace SharedCockpitClient
         /// <summary>
         /// Rol lógico del nodo (HOST / CLIENT) para WebSocketManager.
         /// </summary>
-        public static string Role { get; set; } = string.Empty;
+        public static string Role = "none";
 
         /// <summary>
         /// Dirección IP o host remoto al que se conectará el cliente.
