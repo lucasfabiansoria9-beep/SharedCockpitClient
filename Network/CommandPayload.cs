@@ -1,7 +1,5 @@
 using System;
-using SharedCockpitClient.FlightData;
-
-namespace SharedCockpitClient.Network
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Representa un comando discreto recibido/enviado por WebSocket.

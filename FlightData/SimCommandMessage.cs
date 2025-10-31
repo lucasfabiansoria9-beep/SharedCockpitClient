@@ -1,6 +1,6 @@
 using System;
 
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Representa un comando discreto de cabina (SimEvent) emitido por el host/local para sincronizarse.

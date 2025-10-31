@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Text.Json;
 
-namespace SharedCockpitClient.Network
+namespace SharedCockpitClient
 {
     public static class SyncMessageTypes
     {

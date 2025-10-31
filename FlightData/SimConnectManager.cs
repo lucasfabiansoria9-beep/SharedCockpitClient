@@ -4,7 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.FlightSimulator.SimConnect;
 
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Orquesta la interacción con SimConnect real, generando snapshots y aplicando comandos remotos.
@@ -88,6 +88,8 @@ namespace SharedCockpitClient.FlightData
                 _simConnect.OnRecvQuit += (_, _) =>
                 {
                     Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
+                    _simConnect?.Dispose();
+                    _simConnect = null;
                     IsConnected = false;
                     _offlineMode = true;
                     _initialSnapshotQueued = false;
@@ -119,7 +121,6 @@ namespace SharedCockpitClient.FlightData
                 _simConnect = null;
                 IsConnected = false;
                 _offlineMode = true;
-                Console.WriteLine("[SimConnect] ⚪ Offline (SimConnect no disponible).");
                 StartOfflineLoop();
             }
         }
@@ -129,8 +130,7 @@ namespace SharedCockpitClient.FlightData
             IsConnected = true;
             _offlineMode = false;
             StopOfflineLoop();
-            GlobalFlags.IsLabMode = false;
-            LabConsole.StopSafe();
+            GlobalFlags.DisableLabMode();
             Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
             lastValues.Clear();
 
@@ -288,7 +288,6 @@ namespace SharedCockpitClient.FlightData
                 _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
 
             _aircraftState.ApplySnapshot(snapshot.ToFlatDictionary());
-            OnSnapshot?.Invoke(snapshot, true);
         }
 
         private void RegisterStructForDescriptor(SIMCONNECT_DATA_DEFINITION_ID definitionId, SimDataType type)
@@ -467,10 +466,15 @@ namespace SharedCockpitClient.FlightData
         // ------------------------------------------------------------------
         // Métodos base de snapshot y sincronización
         // ------------------------------------------------------------------
-        private async Task<IDictionary<string, object?>> ReadSnapshotFlatAsync(CancellationToken ct)
+        private Task<IDictionary<string, object?>> ReadSnapshotFlatAsync(CancellationToken ct)
         {
-            await Task.Delay(100, ct);
-            return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, object?> copy;
+            lock (_snapshotLock)
+            {
+                copy = new Dictionary<string, object?>(_lastSnapshot.Values, StringComparer.OrdinalIgnoreCase);
+            }
+
+            return Task.FromResult<IDictionary<string, object?>>(copy);
         }
 
         public void Start()
@@ -535,7 +539,6 @@ namespace SharedCockpitClient.FlightData
             {
                 _simConnect.SetDataOnSimObject(definitionId, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_DATA_SET_FLAG.DEFAULT, payload!);
                 var key = BuildSimVarKey(descriptor);
-                Console.WriteLine($"[SimConnect] ⇢ Set {key} = {normalized}");
                 MirrorState(key, normalized);
                 return Task.FromResult(true);
             }
@@ -576,7 +579,6 @@ namespace SharedCockpitClient.FlightData
                     (SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS,
                     SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
 
-                Console.WriteLine($"[SimConnect] ⇢ Event {descriptor.EventName} ({eventData})");
                 return Task.FromResult(true);
             }
             catch (Exception ex)
@@ -596,16 +598,29 @@ namespace SharedCockpitClient.FlightData
                     _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
             }
 
-            var flat = snapshot.ToFlatDictionary();
-            _aircraftState.ApplySnapshot(flat);
-            OnSnapshot?.Invoke(snapshot, isDiff);
-
             if (snapshot.TryGetDouble("FRAME RATE", out var fps) && fps >= 0)
                 LastFps = fps;
             else if (snapshot.TryGetDouble("FRAME RATE VAR", out var fpsVar) && fpsVar >= 0)
                 LastFps = fpsVar;
             else if (!IsConnected)
                 LastFps = -1;
+
+            var flat = snapshot.ToFlatDictionary();
+            _aircraftState.ApplySnapshot(flat);
+
+            var count = snapshot.Values?.Count ?? 0;
+            if (count == 0 && snapshot.IsDiff)
+                return;
+
+            if (count > 0)
+            {
+                var description = snapshot.IsDiff
+                    ? $"📤 Snapshot enviado: {count} variables modificadas."
+                    : $"📤 Snapshot enviado: {count} variables iniciales.";
+                Console.WriteLine($"[SimConnect] {description}");
+            }
+
+            OnSnapshot?.Invoke(snapshot, isDiff);
         }
 
         private void MirrorState(string path, object? value)
@@ -693,23 +708,25 @@ namespace SharedCockpitClient.FlightData
             var token = _offlineCts.Token;
             _offlineTask = Task.Run(async () =>
             {
-                Console.WriteLine("[SimConnect] Offline mode activo (snapshots dummy 1 Hz).");
-                while (!token.IsCancellationRequested)
+                Console.WriteLine("[SimConnect] ⚪ Offline (SimConnect no disponible). Reintentando cada 5 s...");
+                LastFps = -1;
+
+                while (!token.IsCancellationRequested && !IsConnected)
                 {
                     try
                     {
-                        var snapshot = new SimStateSnapshot { IsDiff = false };
-                        LastFps = -1;
-                        HandleSnapshot(snapshot, false);
+                        InitializeSimConnect();
+                        if (IsConnected)
+                            break;
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[SimConnect] ⚠️ Error en offline loop: {ex.Message}");
+                        Console.WriteLine($"[SimConnect] ⚠️ Reintento fallido: {ex.Message}");
                     }
 
                     try
                     {
-                        await Task.Delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+                        await Task.Delay(TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
                     }
                     catch (TaskCanceledException)
                     {

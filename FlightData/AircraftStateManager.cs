@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Mantiene el estado actual del avión y notifica cambios a SyncController.
@@ -43,7 +43,6 @@ namespace SharedCockpitClient.FlightData
                 {
                     _state[prop] = value;
                     OnPropertyChanged?.Invoke(prop, value);
-                    Console.WriteLine($"[LocalChange] {prop} = {value}");
                 }
             }
         }
@@ -79,8 +78,6 @@ namespace SharedCockpitClient.FlightData
             if (snapshot == null)
                 return;
 
-            int changedCount = 0;
-
             lock (_state)
             {
                 foreach (var kvp in snapshot)
@@ -93,17 +90,11 @@ namespace SharedCockpitClient.FlightData
                     if (!_state.ContainsKey(kvp.Key) || !Equals(_state[kvp.Key], kvp.Value))
                     {
                         _state[kvp.Key] = kvp.Value;
-                        changedCount++;
                         OnPropertyChanged?.Invoke(kvp.Key, kvp.Value);
                     }
                 }
 
                 _lastSnapshot = new Dictionary<string, object?>(_state);
-            }
-
-            if (changedCount > 0)
-            {
-                Console.WriteLine($"[RemoteChange] {changedCount} claves aplicadas");
             }
         }
 
@@ -129,7 +120,6 @@ namespace SharedCockpitClient.FlightData
                 {
                     foreach (var kvp in _lastSnapshot)
                         _state[kvp.Key] = kvp.Value;
-                    Console.WriteLine("[State] Snapshot restaurado.");
                 }
             }
         }

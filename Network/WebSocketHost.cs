@@ -7,9 +7,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using SharedCockpitClient.Utils;
-
-namespace SharedCockpitClient.Network
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Servidor WebSocket que maneja las conexiones del copiloto.

@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using SharedCockpitClient.Tools;
-
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     public enum SimDataType
     {

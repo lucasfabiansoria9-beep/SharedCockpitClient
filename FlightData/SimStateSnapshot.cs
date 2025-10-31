@@ -2,9 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
-using SharedCockpitClient.Tools;
-
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Representa un snapshot (full o incremental) del estado del simulador con rutas canónicas.
