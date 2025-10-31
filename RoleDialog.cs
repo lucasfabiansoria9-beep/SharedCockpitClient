@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Session;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -16,21 +17,25 @@ namespace SharedCockpitClient
 
         public RoleDialog()
         {
+            // 🧩 Prevent nullable warnings for WinForms designer
             InitializeComponent();
 
-            rbHost.CheckedChanged += (_, __) => UpdateRoleUI();
-            rbClient.CheckedChanged += (_, __) => UpdateRoleUI();
-            lstRooms.SelectedIndexChanged += (_, __) => ApplyRoomSelection();
-            lstRooms.DoubleClick += (_, __) => btnContinue.PerformClick();
+            rbHost!.CheckedChanged += (_, __) => UpdateRoleUI();
+            rbClient!.CheckedChanged += (_, __) => UpdateRoleUI();
+            lstRooms!.SelectedIndexChanged += (_, __) => ApplyRoomSelection();
+            lstRooms!.DoubleClick += (_, __) => btnContinue?.PerformClick();
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = 1000 };
             _refreshTimer.Tick += (_, __) => RefreshDiscoveryList();
 
             Shown += (_, __) =>
             {
-                rbHost.Checked = true;
+                if (rbHost != null)
+                {
+                    rbHost.Checked = true;
+                }
                 UpdateRoleUI();
-                txtPlayerName.Focus();
+                txtPlayerName?.Focus();
             };
 
             FormClosed += (_, __) =>
@@ -45,19 +50,26 @@ namespace SharedCockpitClient
 
         private void UpdateRoleUI()
         {
-            var isHost = rbHost.Checked;
-            panelHost.Visible = isHost;
-            panelClient.Visible = !isHost;
+            var isHost = rbHost?.Checked == true;
+            if (panelHost != null)
+            {
+                panelHost.Visible = isHost;
+            }
+
+            if (panelClient != null)
+            {
+                panelClient.Visible = !isHost;
+            }
 
             if (isHost)
             {
                 CleanupListener();
-                txtRoomName.Focus();
+                txtRoomName?.Focus();
             }
             else
             {
                 EnsureListener();
-                txtManualEndpoint.Focus();
+                txtManualEndpoint?.Focus();
             }
         }
 
@@ -75,7 +87,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Discovery] ❌ No se pudo iniciar listener: {ex.Message}");
+                Logger.Error($"[Discovery] ❌ No se pudo iniciar listener: {ex.Message}");
             }
         }
 
@@ -115,43 +127,49 @@ namespace SharedCockpitClient
                 return;
 
             _currentRooms = snapshot;
-            lstRooms.BeginUpdate();
-            lstRooms.Items.Clear();
-            foreach (var room in snapshot)
+            if (lstRooms != null)
             {
-                lstRooms.Items.Add(room.Display);
+                lstRooms.BeginUpdate();
+                lstRooms.Items.Clear();
+                foreach (var room in snapshot)
+                {
+                    lstRooms.Items.Add(room.Display);
+                }
+                lstRooms.EndUpdate();
             }
-            lstRooms.EndUpdate();
         }
 
         private void ApplyRoomSelection()
         {
-            if (lstRooms.SelectedIndex < 0 || lstRooms.SelectedIndex >= _currentRooms.Length)
+            if (lstRooms == null || lstRooms.SelectedIndex < 0 || lstRooms.SelectedIndex >= _currentRooms.Length)
                 return;
 
             var room = _currentRooms[lstRooms.SelectedIndex];
-            txtManualEndpoint.Text = $"{room.Address}:{room.Port}";
+            if (txtManualEndpoint != null)
+            {
+                txtManualEndpoint.Text = $"{room.Address}:{room.Port}";
+            }
         }
 
         private void btnContinue_Click(object sender, EventArgs e)
         {
-            var playerName = txtPlayerName.Text.Trim();
+            var playerName = txtPlayerName?.Text.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(playerName))
             {
                 MessageBox.Show(this, "Ingrese el nombre del jugador.", "SharedCockpitClient",
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                txtPlayerName.Focus();
+                txtPlayerName?.Focus();
                 return;
             }
 
-            if (rbHost.Checked)
+            if (rbHost?.Checked == true)
             {
-                var roomName = txtRoomName.Text.Trim();
+                var roomName = txtRoomName?.Text.Trim() ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(roomName))
                 {
                     MessageBox.Show(this, "Ingrese un nombre de sala.", "SharedCockpitClient",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    txtRoomName.Focus();
+                    txtRoomName?.Focus();
                     return;
                 }
 
@@ -159,17 +177,17 @@ namespace SharedCockpitClient
                     playerName,
                     SessionRole.Host,
                     roomName,
-                    chkPublic.Checked,
+                    chkPublic?.Checked ?? false,
                     hostEndpoint: null);
             }
             else
             {
-                var endpoint = txtManualEndpoint.Text.Trim();
+                var endpoint = txtManualEndpoint?.Text.Trim() ?? string.Empty;
                 if (string.IsNullOrWhiteSpace(endpoint))
                 {
                     MessageBox.Show(this, "Seleccione una sala o ingrese IP:Puerto.", "SharedCockpitClient",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    txtManualEndpoint.Focus();
+                    txtManualEndpoint?.Focus();
                     return;
                 }
 
@@ -177,8 +195,8 @@ namespace SharedCockpitClient
                 {
                     MessageBox.Show(this, "Formato de IP:Puerto inválido.", "SharedCockpitClient",
                         MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    txtManualEndpoint.Focus();
-                    txtManualEndpoint.SelectAll();
+                    txtManualEndpoint?.Focus();
+                    txtManualEndpoint?.SelectAll();
                     return;
                 }
 

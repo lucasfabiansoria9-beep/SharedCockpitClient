@@ -7,6 +7,7 @@ using System.Net.Sockets;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient.Network
 {
@@ -69,7 +70,7 @@ namespace SharedCockpitClient.Network
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Discovery] ⚠️ Error en listener: {ex.Message}");
+                Logger.Warn($"[Discovery] ⚠️ Error en listener: {ex.Message}");
             }
         }
 

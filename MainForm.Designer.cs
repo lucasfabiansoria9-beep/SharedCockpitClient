@@ -3,26 +3,26 @@ namespace SharedCockpitClient
 {
     partial class MainForm
     {
-        private System.ComponentModel.IContainer components = null;
-        private System.Windows.Forms.TableLayoutPanel tableStatus;
-        private System.Windows.Forms.Label lblRoleCaption;
-        private System.Windows.Forms.Label lblRoleValue;
-        private System.Windows.Forms.Label lblRoomCaption;
-        private System.Windows.Forms.Label lblRoomValue;
-        private System.Windows.Forms.Label lblNetworkCaption;
-        private System.Windows.Forms.Label lblNetworkValue;
-        private System.Windows.Forms.Label lblLatencyCaption;
-        private System.Windows.Forms.Label lblLatencyValue;
-        private System.Windows.Forms.Label lblDiffCaption;
-        private System.Windows.Forms.Label lblDiffValue;
-        private System.Windows.Forms.Label lblLastSentCaption;
-        private System.Windows.Forms.Label lblLastSentValue;
-        private System.Windows.Forms.Label lblLastReceivedCaption;
-        private System.Windows.Forms.Label lblLastReceivedValue;
-        private System.Windows.Forms.Button btnStartHost;
-        private System.Windows.Forms.Button btnConnectClient;
-        private System.Windows.Forms.Button btnStop;
-        private System.Windows.Forms.TextBox txtLog;
+        private System.ComponentModel.IContainer? components = null;
+        private System.Windows.Forms.TableLayoutPanel? tableStatus;
+        private System.Windows.Forms.Label? lblRoleCaption;
+        private System.Windows.Forms.Label? lblRoleValue;
+        private System.Windows.Forms.Label? lblRoomCaption;
+        private System.Windows.Forms.Label? lblRoomValue;
+        private System.Windows.Forms.Label? lblNetworkCaption;
+        private System.Windows.Forms.Label? lblNetworkValue;
+        private System.Windows.Forms.Label? lblLatencyCaption;
+        private System.Windows.Forms.Label? lblLatencyValue;
+        private System.Windows.Forms.Label? lblDiffCaption;
+        private System.Windows.Forms.Label? lblDiffValue;
+        private System.Windows.Forms.Label? lblLastSentCaption;
+        private System.Windows.Forms.Label? lblLastSentValue;
+        private System.Windows.Forms.Label? lblLastReceivedCaption;
+        private System.Windows.Forms.Label? lblLastReceivedValue;
+        private System.Windows.Forms.Button? btnStartHost;
+        private System.Windows.Forms.Button? btnConnectClient;
+        private System.Windows.Forms.Button? btnStop;
+        private System.Windows.Forms.TextBox? txtLog;
 
         protected override void Dispose(bool disposing)
         {

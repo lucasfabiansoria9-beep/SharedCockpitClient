@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.FlightSimulator.SimConnect;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -56,10 +57,10 @@ namespace SharedCockpitClient
             _localInstanceKey = _localInstanceId.ToString("N");
 
 #if SIMCONNECT_STUB
-            Console.WriteLine("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para compilación. La sincronización en vivo requiere la DLL real.");
+            Logger.Warn("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para compilación. La sincronización en vivo requiere la DLL real.");
 #endif
 
-            Console.WriteLine("[SimConnect] 🚀 Inicializando conexión real con MSFS2024...");
+            Logger.Info("[SimConnect] 🚀 Inicializando conexión real con MSFS2024...");
             InitializeSimConnect();
             _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
 
@@ -90,11 +91,11 @@ namespace SharedCockpitClient
                 var registeredVars = RegisterSimVarSubscriptions();
                 var registeredEvents = RegisterSimEvents();
 
-                Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {registeredVars} variables, {registeredEvents} eventos.");
+                Logger.Info($"[SimConnect] 📘 Catálogo cargado: {registeredVars} variables, {registeredEvents} eventos.");
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ❌ Error al conectar: {ex.Message}");
+                Logger.Error($"[SimConnect] ❌ Error al conectar: {ex.Message}");
                 _simConnect = null;
                 IsConnected = false;
                 throw;
@@ -105,7 +106,7 @@ namespace SharedCockpitClient
         {
             IsConnected = true;
             StopOfflineLoop();
-            Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
+            Logger.Info("[SimConnect] ✅ Conexión establecida correctamente.");
             lastValues.Clear();
 
             if (!_initialSnapshotQueued)
@@ -159,7 +160,7 @@ namespace SharedCockpitClient
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[SimConnect] ⚠️ No se pudo registrar SimVar {descriptor.Name}: {ex.Message}");
+                    Logger.Warn($"[SimConnect] ⚠️ No se pudo registrar SimVar {descriptor.Name}: {ex.Message}");
                 }
             }
 
@@ -198,7 +199,7 @@ namespace SharedCockpitClient
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[SimConnect] ⚠️ No se pudo mapear evento {descriptor.EventName}: {ex.Message}");
+                    Logger.Warn($"[SimConnect] ⚠️ No se pudo mapear evento {descriptor.EventName}: {ex.Message}");
                 }
             }
 
@@ -206,26 +207,26 @@ namespace SharedCockpitClient
             return registered;
         }
 
-        private void HandleSimConnectOpen(object sender, EventArgs e)
+        private void HandleSimConnectOpen(object? sender, EventArgs e)
         {
             OnSimConnectOpened();
         }
 
-        private void HandleSimConnectQuit(object sender, EventArgs e)
+        private void HandleSimConnectQuit(object? sender, EventArgs e)
         {
-            Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
+            Logger.Error("[SimConnect] ❌ Sesión cerrada.");
             _simConnect?.Dispose();
             _simConnect = null;
             IsConnected = false;
             _initialSnapshotQueued = false;
         }
 
-        private void HandleSimConnectException(object sender, SIMCONNECT_RECV_EXCEPTION data)
+        private void HandleSimConnectException(object? sender, SIMCONNECT_RECV_EXCEPTION data)
         {
-            Console.WriteLine($"[SimConnect] ⚠️ Excepción: {data.dwException}");
+            Logger.Warn($"[SimConnect] ⚠️ Excepción: {data.dwException}");
         }
 
-        private void HandleSimConnectSimobjectData(object sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void HandleSimConnectSimobjectData(object? sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
             try
             {
@@ -233,11 +234,11 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error procesando snapshot: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error procesando snapshot: {ex.Message}");
             }
         }
 
-        private void HandleSimConnectEvent(object sender, SIMCONNECT_RECV_EVENT data)
+        private void HandleSimConnectEvent(object? sender, SIMCONNECT_RECV_EVENT data)
         {
             if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
                 return;
@@ -268,7 +269,7 @@ namespace SharedCockpitClient
                 Value = data.dwData
             };
 
-            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {normalized} (local)");
+            Logger.Debug($"[RealtimeSync] 🛠 Control recibido: {normalized} (local)");
             OnCommand?.Invoke(message);
         }
 
@@ -325,7 +326,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error registrando estructura para {definitionId}: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error registrando estructura para {definitionId}: {ex.Message}");
             }
         }
 
@@ -371,7 +372,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error leyendo {descriptor.Name}: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error leyendo {descriptor.Name}: {ex.Message}");
             }
 
             return false;
@@ -434,7 +435,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error convirtiendo valor para {descriptor.Name}: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error convirtiendo valor para {descriptor.Name}: {ex.Message}");
             }
 
             return false;
@@ -455,7 +456,7 @@ namespace SharedCockpitClient
 
         private async Task EmitInitialSnapshotWithDelayAsync()
         {
-            Console.WriteLine("[SimConnect] 🕐 Esperando inicialización de variables...");
+            Logger.Info("[SimConnect] 🕐 Esperando inicialización de variables...");
             await Task.Delay(1500).ConfigureAwait(false);
             EmitInitialSnapshot();
         }
@@ -466,11 +467,11 @@ namespace SharedCockpitClient
             if (snapshot.Values != null && snapshot.Values.Count > 0)
             {
                 OnSnapshot?.Invoke(snapshot, false);
-                Console.WriteLine($"[SimConnect] 📤 Snapshot inicial emitido con {snapshot.Values.Count} variables.");
+                Logger.Info($"[SimConnect] 📤 Snapshot inicial emitido con {snapshot.Values.Count} variables.");
             }
             else
             {
-                Console.WriteLine("[SimConnect] ⚠️ Snapshot inicial omitido (sin datos)");
+                Logger.Warn("[SimConnect] ⚠️ Snapshot inicial omitido (sin datos)");
             }
         }
 
@@ -504,7 +505,7 @@ namespace SharedCockpitClient
                 if ((DateTime.UtcNow - start).TotalMilliseconds > timeoutMs)
                     break;
 
-                Console.WriteLine("[SimConnect] ⏳ Esperando MSFS...");
+                Logger.Info("[SimConnect] ⏳ Esperando MSFS...");
                 await Task.Delay(1000).ConfigureAwait(false);
             }
 
@@ -522,7 +523,7 @@ namespace SharedCockpitClient
             }
             while (true);
 
-            Console.WriteLine("[SimConnect] 🛫 Cabina lista.");
+            Logger.Info("[SimConnect] 🛫 Cabina lista.");
         }
 
         public Task StopAsync() => _collector.StopAsync();
@@ -550,7 +551,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error aplicando cambio {descriptor.Name}: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error aplicando cambio {descriptor.Name}: {ex.Message}");
                 return Task.FromResult(false);
             }
         }
@@ -589,7 +590,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error disparando evento {descriptor.EventName}: {ex.Message}");
+                Logger.Warn($"[SimConnect] ⚠️ Error disparando evento {descriptor.EventName}: {ex.Message}");
                 return Task.FromResult(false);
             }
         }
@@ -623,7 +624,7 @@ namespace SharedCockpitClient
                 var description = snapshot.IsDiff
                     ? $"📤 Snapshot enviado: {count} variables modificadas."
                     : $"📤 Snapshot enviado: {count} variables iniciales.";
-                Console.WriteLine($"[SimConnect] {description}");
+                Logger.Info($"[SimConnect] {description}");
             }
 
             OnSnapshot?.Invoke(snapshot, isDiff);
@@ -705,7 +706,7 @@ namespace SharedCockpitClient
         {
             StopOfflineLoop();
             IsConnected = false;
-            Console.WriteLine("[SimConnect] ⚪ Offline. Requiere reinicio del cliente para reconectar.");
+            Logger.Warn("[SimConnect] ⚪ Offline. Requiere reinicio del cliente para reconectar.");
         }
 
         private void StopOfflineLoop()

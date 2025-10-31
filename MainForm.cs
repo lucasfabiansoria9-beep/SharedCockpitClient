@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Session;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -33,6 +34,8 @@ namespace SharedCockpitClient
         public MainForm(StartupSessionInfo sessionInfo)
         {
             _sessionInfo = sessionInfo ?? throw new ArgumentNullException(nameof(sessionInfo));
+
+            // 🧩 Prevent nullable warnings for WinForms designer
             InitializeComponent();
 
             Load += MainForm_Load;
@@ -61,8 +64,8 @@ namespace SharedCockpitClient
 
         private async void MainForm_Load(object? sender, EventArgs e)
         {
-            lblRoleValue.Text = _sessionInfo.Role == SessionRole.Host ? "HOST" : "CLIENT";
-            lblRoomValue.Text = _sessionInfo.RoomName;
+            lblRoleValue!.Text = _sessionInfo.Role == SessionRole.Host ? "HOST" : "CLIENT";
+            lblRoomValue!.Text = _sessionInfo.RoomName;
             UpdateNetworkStatus("🟡 Iniciando", "🟡 Iniciando");
             UpdateLatency(0);
             UpdateDiffCount(0);
@@ -72,7 +75,7 @@ namespace SharedCockpitClient
 
             AppendLog("────────────────────────────────");
             AppendLog("✈️ SharedCockpitClient iniciado");
-            AppendLog($"[Boot] Rol seleccionado: {lblRoleValue.Text} | Sala: {_sessionInfo.RoomName}");
+            AppendLog($"[Boot] Rol seleccionado: {lblRoleValue!.Text} | Sala: {_sessionInfo.RoomName}");
             AppendLog("────────────────────────────────");
 
             await InitializeSimConnectAsync().ConfigureAwait(false);
@@ -234,7 +237,7 @@ namespace SharedCockpitClient
             _lastDiffCount = snapshot.Values.Count;
             UpdateDiffCount(_lastDiffCount);
 
-            _realtimeSync.UpdateAndSync(snapshot, lblRoleValue.Text);
+            _realtimeSync.UpdateAndSync(snapshot, lblRoleValue?.Text ?? string.Empty);
         }
 
         private void HandleSimCommand(SimCommandMessage message)
@@ -353,11 +356,14 @@ namespace SharedCockpitClient
 
             lock (_logLock)
             {
-                if (txtLog.TextLength > 0)
-                    txtLog.AppendText(Environment.NewLine);
-                txtLog.AppendText(line);
+                if (txtLog != null)
+                {
+                    if (txtLog.TextLength > 0)
+                        txtLog.AppendText(Environment.NewLine);
+                    txtLog.AppendText(line);
+                }
             }
-            Console.WriteLine(line);
+            Logger.Info(line);
         }
 
         private void UpdateNetworkStatus(string text, string consoleText)
@@ -372,8 +378,8 @@ namespace SharedCockpitClient
                 return;
 
             _currentNetworkStatus = text;
-            lblNetworkValue.Text = text;
-            Console.WriteLine($"[Network] {consoleText}");
+            lblNetworkValue!.Text = text;
+            Logger.Info($"[Network] {consoleText}");
         }
 
         private void UpdateLatency(double latencyMs)
@@ -384,7 +390,7 @@ namespace SharedCockpitClient
                 return;
             }
 
-            lblLatencyValue.Text = latencyMs <= 0 ? "-" : $"{latencyMs:F0} ms";
+            lblLatencyValue!.Text = latencyMs <= 0 ? "-" : $"{latencyMs:F0} ms";
         }
 
         private void UpdateDiffCount(int count)
@@ -395,7 +401,7 @@ namespace SharedCockpitClient
                 return;
             }
 
-            lblDiffValue.Text = count > 0 ? count.ToString() : "-";
+            lblDiffValue!.Text = count > 0 ? count.ToString() : "-";
         }
 
         private void UpdateLastSent(DateTime? timestampUtc, int bytes)
@@ -408,7 +414,7 @@ namespace SharedCockpitClient
 
             _lastSentUtc = timestampUtc;
             _lastSentBytes = bytes;
-            lblLastSentValue.Text = timestampUtc == null
+            lblLastSentValue!.Text = timestampUtc == null
                 ? "-"
                 : $"{timestampUtc:HH:mm:ss} UTC · {bytes} bytes";
         }
@@ -423,7 +429,7 @@ namespace SharedCockpitClient
 
             _lastReceivedUtc = timestampUtc;
             _lastReceivedBytes = bytes;
-            lblLastReceivedValue.Text = timestampUtc == null
+            lblLastReceivedValue!.Text = timestampUtc == null
                 ? "-"
                 : $"{timestampUtc:HH:mm:ss} UTC · {bytes} bytes";
         }
@@ -436,9 +442,9 @@ namespace SharedCockpitClient
                 return;
             }
 
-            btnStartHost.Enabled = false;
-            btnConnectClient.Enabled = false;
-            btnStop.Enabled = false;
+            btnStartHost!.Enabled = false;
+            btnConnectClient!.Enabled = false;
+            btnStop!.Enabled = false;
         }
 
         private void EnableButtonsForRole()
@@ -449,9 +455,9 @@ namespace SharedCockpitClient
                 return;
             }
 
-            btnStartHost.Enabled = _sessionInfo.Role == SessionRole.Host;
-            btnConnectClient.Enabled = _sessionInfo.Role == SessionRole.Client;
-            btnStop.Enabled = true;
+            btnStartHost!.Enabled = _sessionInfo.Role == SessionRole.Host;
+            btnConnectClient!.Enabled = _sessionInfo.Role == SessionRole.Client;
+            btnStop!.Enabled = true;
         }
 
         private void DisableSessionButtons()
@@ -462,9 +468,9 @@ namespace SharedCockpitClient
                 return;
             }
 
-            btnStartHost.Enabled = false;
-            btnConnectClient.Enabled = false;
-            btnStop.Enabled = false;
+            btnStartHost!.Enabled = false;
+            btnConnectClient!.Enabled = false;
+            btnStop!.Enabled = false;
         }
 
         private static string ResolveLocalAddress()

@@ -10,6 +10,12 @@
   </PropertyGroup>
 
   <PropertyGroup>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <NoWarn>IDE0051;CA1822;CS1591;CS8618;CS8622;CS8625;CS8602;CS2002</NoWarn>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
@@ -48,6 +54,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Remove="Stubs\SimConnectStub.cs" />
   </ItemGroup>
 
   <ItemGroup Condition="!Exists('libs\\native\\win-x64\\SimConnect.dll')">

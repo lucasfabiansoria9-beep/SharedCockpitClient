@@ -1,27 +1,23 @@
-#nullable enable
 using System;
 
-namespace SharedCockpitClient;
-
-public static class Logger
+namespace SharedCockpitClient.Utils
 {
-    public static void Info(string message) => Write(message, ConsoleColor.White);
-
-    public static void Warn(string message) => Write(message, ConsoleColor.Yellow);
-
-    public static void Error(string message) => Write(message, ConsoleColor.Red);
-
-    private static void Write(string message, ConsoleColor color)
+    public static class Logger
     {
-        var original = Console.ForegroundColor;
-        try
+        public static void Info(string message) =>
+            Console.WriteLine($"[INFO] {DateTime.Now:HH:mm:ss} {message}");
+
+        public static void Warn(string message) =>
+            Console.WriteLine($"[WARN] {DateTime.Now:HH:mm:ss} {message}");
+
+        public static void Error(string message) =>
+            Console.WriteLine($"[ERROR] {DateTime.Now:HH:mm:ss} {message}");
+
+        public static void Debug(string message)
         {
-            Console.ForegroundColor = color;
-            Console.WriteLine(message);
-        }
-        finally
-        {
-            Console.ForegroundColor = original;
+#if DEBUG
+            Console.WriteLine($"[DEBUG] {DateTime.Now:HH:mm:ss} {message}");
+#endif
         }
     }
 }
