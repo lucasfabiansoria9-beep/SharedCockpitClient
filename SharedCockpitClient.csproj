@@ -5,6 +5,10 @@
   dotnet publish "SharedCockpitClient.csproj" -c Release -r win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:PublishTrimmed=false -o "E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish"
   -->
 
+  <PropertyGroup Condition="!Exists('libs\\native\\win-x64\\SimConnect.dll')">
+    <DefineConstants>$(DefineConstants);SIMCONNECT_STUB</DefineConstants>
+  </PropertyGroup>
+
   <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
@@ -23,18 +27,25 @@
     <!-- 🔒 Perfil laboratorio: silencia archivos no usados en Fase 1 -->
   </PropertyGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
     <Reference Include="Microsoft.FlightSimulator.SimConnect">
       <HintPath>libs\native\win-x64\SimConnect.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
 
-  <ItemGroup>
+  <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
     <Content Include="libs\native\win-x64\SimConnect.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
+  </ItemGroup>
+
+  <ItemGroup Condition="!Exists('libs\\native\\win-x64\\SimConnect.dll')">
+    <Compile Include="Stubs\SimConnectStub.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <Content Include="scripts\**\*.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
