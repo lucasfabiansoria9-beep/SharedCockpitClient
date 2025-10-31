@@ -326,12 +326,10 @@ namespace SharedCockpitClient
             {
                 switch (type)
                 {
-                    case SimDataType.Float32:
-                    case SimDataType.Float64:
+                    case SimDataType.Float32 or SimDataType.Float64:
                         simConnect.RegisterDataDefineStruct<double>(ToSimConnect(definitionId));
                         break;
-                    case SimDataType.Int32:
-                    case SimDataType.Bool:
+                    case SimDataType.Int32 or SimDataType.Bool:
                         simConnect.RegisterDataDefineStruct<int>(ToSimConnect(definitionId));
                         break;
                     case SimDataType.String256:
@@ -413,8 +411,7 @@ namespace SharedCockpitClient
             {
                 switch (descriptor.DataType)
                 {
-                    case SimDataType.Float64:
-                    case SimDataType.Float32:
+                    case SimDataType.Float32 or SimDataType.Float64:
                         value = Convert.ToDouble(raw);
                         return true;
                     case SimDataType.Int32:
