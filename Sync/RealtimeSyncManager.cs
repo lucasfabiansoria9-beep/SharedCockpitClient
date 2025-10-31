@@ -5,6 +5,8 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
+using SharedCockpitClient.Utils;
+
 namespace SharedCockpitClient
 {
     public class RealtimeSyncManager : IDisposable
@@ -72,7 +74,7 @@ namespace SharedCockpitClient
                     if ((DateTime.UtcNow - _firstSnapshotUtc).TotalMilliseconds > WARMUP_MS)
                     {
                         IsActive = true;
-                        Console.WriteLine("[RealtimeSync] ✅ Sincronización activada");
+                        Logger.Info("[RealtimeSync] ✅ Sincronización activada");
                     }
                     else
                     {
@@ -114,7 +116,7 @@ namespace SharedCockpitClient
                 Log(logLine!);
                 var surfaces = diffCopy != null ? BuildSurfaceLog(diffCopy) : null;
                 if (!string.IsNullOrEmpty(surfaces))
-                    Console.WriteLine(surfaces);
+                    Logger.Debug(surfaces);
             }
         }
 
@@ -175,7 +177,7 @@ namespace SharedCockpitClient
             Log(logLine);
             var surfaces = BuildSurfaceLog(filtered);
             if (!string.IsNullOrEmpty(surfaces))
-                Console.WriteLine(surfaces);
+                Logger.Debug(surfaces);
         }
 
         private Dictionary<string, object?> CalculateDiff(SimStateSnapshot? previous, SimStateSnapshot current)
@@ -257,7 +259,7 @@ namespace SharedCockpitClient
                 value = command.Value
             });
 
-            Console.WriteLine($"[RealtimeSync] 🛠 Control enviado: {command.NormalizedCommand}");
+            Logger.Debug($"[RealtimeSync] 🛠 Control enviado: {command.NormalizedCommand}");
             _ = websocket.SendAsync(payload);
         }
 
@@ -282,7 +284,7 @@ namespace SharedCockpitClient
                 }
             }
 
-            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {payload.Command} (from {payload.OriginId ?? "remote"})");
+            Logger.Debug($"[RealtimeSync] 🛠 Control recibido: {payload.Command} (from {payload.OriginId ?? "remote"})");
             var path = payload.Target;
             if (string.IsNullOrWhiteSpace(path))
                 path = payload.NormalizedCommand;
@@ -400,7 +402,7 @@ namespace SharedCockpitClient
                 {
                     if (important || (DateTime.UtcNow - _lastConsoleLog).TotalSeconds >= 1)
                     {
-                        Console.WriteLine(line);
+                        Logger.Info(line);
                         _lastConsoleLog = DateTime.UtcNow;
                     }
                 }

@@ -3,6 +3,7 @@ using System;
 using System.IO;
 using System.Windows.Forms;
 using SharedCockpitClient.Session;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -20,10 +21,10 @@ namespace SharedCockpitClient
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            Console.WriteLine("────────────────────────────────");
-            Console.WriteLine("✈️ SharedCockpitClient iniciado");
-            Console.WriteLine($"[Boot] Versión: {version}");
-            Console.WriteLine("────────────────────────────────");
+            Logger.Info("────────────────────────────────");
+            Logger.Info("✈️ SharedCockpitClient iniciado");
+            Logger.Info($"[Boot] Versión: {version}");
+            Logger.Info("────────────────────────────────");
 
             StartupSessionInfo? sessionInfo = null;
             using (var dialog = new RoleDialog())
@@ -31,7 +32,7 @@ namespace SharedCockpitClient
                 var result = dialog.ShowDialog();
                 if (result != DialogResult.OK || dialog.StartupInfo == null)
                 {
-                    Console.WriteLine("[Boot] Cancelado por el usuario.");
+                    Logger.Info("[Boot] Cancelado por el usuario.");
                     return;
                 }
 
