@@ -278,7 +278,9 @@ namespace SharedCockpitClient
             if (data.dwRequestID == 0 || !_requestToDescriptor.TryGetValue(data.dwRequestID, out var descriptor))
                 return;
 
-            if (!TryReadIncomingValue(descriptor, data.dwData, out var stateValue))
+            var payload = ExtractSimDataPayload(data);
+
+            if (!TryReadIncomingValue(descriptor, payload, out var stateValue))
                 return;
 
             var key = BuildSimVarKey(descriptor);
@@ -333,10 +335,24 @@ namespace SharedCockpitClient
         private static string BuildSimVarKey(SimVarDescriptor descriptor)
             => $"SimVars.{descriptor.Name}";
 
-        private bool TryReadIncomingValue(SimVarDescriptor descriptor, object[]? rawData, out object? value)
+        private static object?[]? ExtractSimDataPayload(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        {
+#if SIMCONNECT_STUB
+            return data.dwData;
+#else
+            return data.dwData switch
+            {
+                object[] array => array,
+                object value => new object?[] { value },
+                _ => null
+            };
+#endif
+        }
+
+        private bool TryReadIncomingValue(SimVarDescriptor descriptor, IReadOnlyList<object?>? rawData, out object? value)
         {
             value = null;
-            if (rawData == null || rawData.Length == 0)
+            if (rawData == null || rawData.Count == 0)
                 return false;
 
             var raw = rawData[0];

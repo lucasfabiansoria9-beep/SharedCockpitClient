@@ -1,3 +1,4 @@
+#if SIMCONNECT_STUB
 #nullable enable
 using System;
 using System.Linq;
@@ -252,3 +253,4 @@ namespace Microsoft.FlightSimulator.SimConnect
     // ----- END SIMCONNECT STUB -----------------------------------------------
     // -------------------------------------------------------------------------
 }
+#endif
