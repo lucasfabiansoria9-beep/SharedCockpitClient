@@ -63,7 +63,7 @@ namespace SharedCockpitClient
             var executing = Assembly.GetExecutingAssembly();
             yield return executing;
 
-            if (!GlobalFlags.EnableAssemblyScanCatalog)
+            if (!AppEnvironment.EnableAssemblyScanCatalog)
             {
                 // Catálogo deshabilitado por defecto para evitar reflejar assemblies externos
                 yield break;
