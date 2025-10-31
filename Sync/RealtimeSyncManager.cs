@@ -127,14 +127,17 @@ namespace SharedCockpitClient
 
             Dictionary<string, object?>? filtered = null;
             string logLine;
-            Guid originGuid = Guid.Empty;
+            string? originKey = null;
 
             if (!string.IsNullOrWhiteSpace(originId))
             {
                 if (string.Equals(originId, _localInstanceId, StringComparison.OrdinalIgnoreCase))
                     return;
 
-                Guid.TryParse(originId, out originGuid);
+                if (Guid.TryParse(originId, out var originGuid))
+                    originKey = originGuid.ToString("N");
+                else
+                    originKey = originId;
             }
 
             lock (syncLock)
@@ -142,12 +145,12 @@ namespace SharedCockpitClient
                 if (lastSnapshot == null)
                     lastSnapshot = new SimStateSnapshot();
 
-                if (originGuid != Guid.Empty)
+                if (!string.IsNullOrWhiteSpace(originKey))
                 {
-                    if (_lastSequenceByOrigin.TryGetValue(originGuid, out var lastSeq) && sequence <= lastSeq)
+                    if (_lastSequenceByOrigin.TryGetValue(originKey, out var lastSeq) && sequence <= lastSeq)
                         return;
 
-                    _lastSequenceByOrigin[originGuid] = sequence;
+                    _lastSequenceByOrigin[originKey] = sequence;
                 }
 
                 filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
