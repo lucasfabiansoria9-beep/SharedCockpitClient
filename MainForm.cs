@@ -120,6 +120,7 @@ namespace SharedCockpitClient
             try
             {
                 _simManager.OnSnapshot -= HandleSimSnapshot;
+                _realtimeSync?.Dispose();
                 _simManager.Dispose();
 
                 if (_wsManager != null)
@@ -178,7 +179,7 @@ namespace SharedCockpitClient
             _realtimeSync?.UpdateAndSync(snapshot, GlobalFlags.Role);
         }
 
-        private void HandleStateDiff(string? role, Dictionary<string, object?> diff)
+        private void HandleStateDiff(string? role, string? originId, long sequence, Dictionary<string, object?> diff)
         {
             if (diff == null || diff.Count == 0)
                 return;
@@ -196,7 +197,7 @@ namespace SharedCockpitClient
             if (filtered.Count == 0)
                 return;
 
-            _realtimeSync?.ApplyRemoteDiff(role, filtered);
+            _realtimeSync?.ApplyRemoteDiff(role, originId, sequence, filtered);
 
             lock (_snapshotLock)
             {
