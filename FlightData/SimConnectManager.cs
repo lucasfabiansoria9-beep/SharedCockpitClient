@@ -207,12 +207,12 @@ namespace SharedCockpitClient
             return registered;
         }
 
-        private void HandleSimConnectOpen(object sender, EventArgs e)
+        private void HandleSimConnectOpen(object? sender, EventArgs e)
         {
             OnSimConnectOpened();
         }
 
-        private void HandleSimConnectQuit(object sender, EventArgs e)
+        private void HandleSimConnectQuit(object? sender, EventArgs e)
         {
             Logger.Error("[SimConnect] ❌ Sesión cerrada.");
             _simConnect?.Dispose();
@@ -221,12 +221,12 @@ namespace SharedCockpitClient
             _initialSnapshotQueued = false;
         }
 
-        private void HandleSimConnectException(object sender, SIMCONNECT_RECV_EXCEPTION data)
+        private void HandleSimConnectException(object? sender, SIMCONNECT_RECV_EXCEPTION data)
         {
             Logger.Warn($"[SimConnect] ⚠️ Excepción: {data.dwException}");
         }
 
-        private void HandleSimConnectSimobjectData(object sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void HandleSimConnectSimobjectData(object? sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
             try
             {
@@ -238,7 +238,7 @@ namespace SharedCockpitClient
             }
         }
 
-        private void HandleSimConnectEvent(object sender, SIMCONNECT_RECV_EVENT data)
+        private void HandleSimConnectEvent(object? sender, SIMCONNECT_RECV_EVENT data)
         {
             if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
                 return;

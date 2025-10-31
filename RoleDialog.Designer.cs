@@ -3,24 +3,24 @@ namespace SharedCockpitClient
 {
     partial class RoleDialog
     {
-        private System.ComponentModel.IContainer components = null;
+        private System.ComponentModel.IContainer? components = null;
 
-        private System.Windows.Forms.TextBox txtPlayerName;
-        private System.Windows.Forms.RadioButton rbHost;
-        private System.Windows.Forms.RadioButton rbClient;
-        private System.Windows.Forms.TextBox txtRoomName;
-        private System.Windows.Forms.CheckBox chkPublic;
-        private System.Windows.Forms.ListBox lstRooms;
-        private System.Windows.Forms.TextBox txtManualEndpoint;
-        private System.Windows.Forms.Label lblManualEndpoint;
-        private System.Windows.Forms.Label lblDiscovered;
-        private System.Windows.Forms.Button btnContinue;
-        private System.Windows.Forms.Button btnCancel;
-        private System.Windows.Forms.Label lblPlayer;
-        private System.Windows.Forms.Label lblRoom;
-        private System.Windows.Forms.Panel panelClient;
-        private System.Windows.Forms.Panel panelHost;
-        private System.Windows.Forms.Label lblRole;
+        private System.Windows.Forms.TextBox? txtPlayerName;
+        private System.Windows.Forms.RadioButton? rbHost;
+        private System.Windows.Forms.RadioButton? rbClient;
+        private System.Windows.Forms.TextBox? txtRoomName;
+        private System.Windows.Forms.CheckBox? chkPublic;
+        private System.Windows.Forms.ListBox? lstRooms;
+        private System.Windows.Forms.TextBox? txtManualEndpoint;
+        private System.Windows.Forms.Label? lblManualEndpoint;
+        private System.Windows.Forms.Label? lblDiscovered;
+        private System.Windows.Forms.Button? btnContinue;
+        private System.Windows.Forms.Button? btnCancel;
+        private System.Windows.Forms.Label? lblPlayer;
+        private System.Windows.Forms.Label? lblRoom;
+        private System.Windows.Forms.Panel? panelClient;
+        private System.Windows.Forms.Panel? panelHost;
+        private System.Windows.Forms.Label? lblRole;
 
         protected override void Dispose(bool disposing)
         {
