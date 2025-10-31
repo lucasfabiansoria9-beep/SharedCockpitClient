@@ -276,7 +276,7 @@ namespace SharedCockpitClient
             });
         }
 
-        private void btnStartHost_Click(object sender, EventArgs e)
+        private void btnStartHost_Click(object? sender, EventArgs e)
         {
             if (_sessionInfo.Role != SessionRole.Host)
             {
@@ -288,7 +288,7 @@ namespace SharedCockpitClient
             _ = StartHostAsync();
         }
 
-        private void btnConnectClient_Click(object sender, EventArgs e)
+        private void btnConnectClient_Click(object? sender, EventArgs e)
         {
             if (_sessionInfo.Role != SessionRole.Client)
             {
@@ -300,7 +300,7 @@ namespace SharedCockpitClient
             _ = StartClientAsync();
         }
 
-        private void btnStop_Click(object sender, EventArgs e)
+        private void btnStop_Click(object? sender, EventArgs e)
         {
             AppendLog("[Network] 🛑 Sesión detenida por el usuario");
             StopNetwork();

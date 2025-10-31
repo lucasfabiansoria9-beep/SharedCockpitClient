@@ -20,6 +20,9 @@ namespace SharedCockpitClient
             // 🧩 Prevent nullable warnings for WinForms designer
             InitializeComponent();
 
+            txtPlayerName?.Text = Environment.UserName;
+            chkPublic?.Checked = true;
+
             rbHost!.CheckedChanged += (_, __) => UpdateRoleUI();
             rbClient!.CheckedChanged += (_, __) => UpdateRoleUI();
             lstRooms!.SelectedIndexChanged += (_, __) => ApplyRoomSelection();
@@ -151,7 +154,7 @@ namespace SharedCockpitClient
             }
         }
 
-        private void btnContinue_Click(object sender, EventArgs e)
+        private void btnContinue_Click(object? sender, EventArgs e)
         {
             var playerName = txtPlayerName?.Text.Trim() ?? string.Empty;
             if (string.IsNullOrWhiteSpace(playerName))
