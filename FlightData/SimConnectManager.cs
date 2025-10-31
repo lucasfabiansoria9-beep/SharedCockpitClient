@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,7 +21,6 @@ namespace SharedCockpitClient
         private SimConnect? _simConnect;
         private IntPtr _windowHandle = IntPtr.Zero;
         private CancellationTokenSource? _offlineCts;
-        private Task? _offlineTask;
         private bool _initialSnapshotQueued;
         private readonly Dictionary<string, object?> lastValues = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<uint, SimVarDescriptor> _requestToDescriptor = new();
@@ -253,8 +253,15 @@ namespace SharedCockpitClient
 
             var normalized = SimDataDefinition.NormalizeEventName(descriptor.EventName);
             var sequence = Interlocked.Increment(ref _commandSequence);
-            var message = new SimCommandMessage(normalized, _localInstanceId, sequence,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), descriptor.Path, data.dwData);
+            var message = new SimCommandMessage
+            {
+                Command = normalized,
+                OriginId = _localInstanceId,
+                Sequence = sequence,
+                Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Target = descriptor.Path,
+                Value = data.dwData
+            };
 
             Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {normalized} (local)");
             OnCommand?.Invoke(message);
@@ -700,7 +707,6 @@ namespace SharedCockpitClient
         {
             _offlineCts?.Dispose();
             _offlineCts = null;
-            _offlineTask = null;
         }
     }
 }

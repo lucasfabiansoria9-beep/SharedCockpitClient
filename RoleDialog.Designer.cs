@@ -1,3 +1,4 @@
+#nullable enable
 namespace SharedCockpitClient
 {
     partial class RoleDialog

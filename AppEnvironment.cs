@@ -1,3 +1,4 @@
+#nullable enable
 namespace SharedCockpitClient
 {
     public static class AppEnvironment

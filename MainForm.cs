@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Net.NetworkInformation;
@@ -26,7 +27,7 @@ namespace SharedCockpitClient
         private int _lastSentBytes;
         private DateTime? _lastReceivedUtc;
         private int _lastReceivedBytes;
-        private readonly Timer _latencyTimer;
+        private readonly System.Windows.Forms.Timer _latencyTimer;
         private string _currentNetworkStatus = string.Empty;
 
         public MainForm(StartupSessionInfo sessionInfo)
@@ -37,7 +38,7 @@ namespace SharedCockpitClient
             Load += MainForm_Load;
             FormClosing += MainForm_FormClosing;
 
-            _latencyTimer = new Timer { Interval = 1000 };
+            _latencyTimer = new System.Windows.Forms.Timer { Interval = 1000 };
             _latencyTimer.Tick += (_, __) =>
             {
                 var latency = _wsManager?.AverageRttMs ?? 0;
@@ -238,7 +239,7 @@ namespace SharedCockpitClient
 
         private void HandleSimCommand(SimCommandMessage message)
         {
-            AppendLog($"[SimConnect] Cmd -> {message.Path} = {message.Value}");
+            AppendLog($"[SimConnect] Cmd -> {message.Command} = {message.Value}");
         }
 
         private void HandleRemoteDiff(string? role, string? originId, long sequence, Dictionary<string, object?> diff)

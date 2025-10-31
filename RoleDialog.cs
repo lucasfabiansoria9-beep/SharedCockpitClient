@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Linq;
 using System.Windows.Forms;
@@ -10,7 +11,7 @@ namespace SharedCockpitClient
     {
         private const int DiscoveryPort = 9801;
         private LanDiscoveryListener? _listener;
-        private readonly Timer _refreshTimer;
+        private readonly System.Windows.Forms.Timer _refreshTimer;
         private LanDiscoveryMessage[] _currentRooms = Array.Empty<LanDiscoveryMessage>();
 
         public RoleDialog()
@@ -22,7 +23,7 @@ namespace SharedCockpitClient
             lstRooms.SelectedIndexChanged += (_, __) => ApplyRoomSelection();
             lstRooms.DoubleClick += (_, __) => btnContinue.PerformClick();
 
-            _refreshTimer = new Timer { Interval = 1000 };
+            _refreshTimer = new System.Windows.Forms.Timer { Interval = 1000 };
             _refreshTimer.Tick += (_, __) => RefreshDiscoveryList();
 
             Shown += (_, __) =>
