@@ -1,22 +1,26 @@
-﻿.vs/
+# Build artifacts
 bin/
 obj/
+publish/
+
+# IDE folders
+.vs/
 *.user
 *.suo
-*.cache
+
+# Logs and caches
 *.log
-*.db
-*.pdb
 *.tmp
+*.cache
+*.db
+
+# Debug symbols
+*.pdb
+
+# Executables and libraries
 *.exe
 *.dll
-*.json.user
-bin/
-obj/
+!libs/native/win-x64/SimConnect.dll
+
+# Local environment
 logs/
-*.user
-*.suo
-*.log
-*.tmp
-*.cache
-.vs/

@@ -7,7 +7,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
 
-namespace SharedCockpitClient.Network
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Gestor WebSocket bidireccional compatible con host y cliente.
@@ -23,10 +23,12 @@ namespace SharedCockpitClient.Network
         private CancellationTokenSource? linkedCts;
         private bool clientConnected;
         private CancellationTokenSource? pingCts;
+        private Task? clientMaintainTask;
         private readonly Queue<double> rttSamples = new();
         private readonly object rttLock = new();
         private double averageRtt;
         private readonly TaskCompletionSource<bool> readyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private DateTime lastPingLogUtc = DateTime.MinValue;
 
         public event Action<string>? OnMessage;
         public event Action<string?, string?, long, Dictionary<string, object?>>? OnStateDiff;
@@ -65,15 +67,15 @@ namespace SharedCockpitClient.Network
                 var listenPort = configuredPort ?? peerUri?.Port ?? 8081;
                 host = new WebSocketHost(listenPort);
                 host.OnMessage += HandleHostMessage;
-                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] Cliente conectado ({id})");
-                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] Cliente desconectado ({id})");
+                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] 👥 Cliente conectado ({id})");
+                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] 👋 Cliente desconectado ({id})");
 
                 _ = Task.Run(() =>
                 {
                     try
                     {
                         host.Start();
-                        Console.WriteLine($"[WebSocket] Host escuchando en ws://0.0.0.0:{listenPort}");
+                        Console.WriteLine($"[WebSocket] 🛰 Host escuchando en ws://0.0.0.0:{listenPort}");
                         readyTcs.TrySetResult(true);
                     }
                     catch (Exception ex)
@@ -89,22 +91,8 @@ namespace SharedCockpitClient.Network
             }
 
             linkedCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            client = new ClientWebSocket();
-            try
-            {
-                await client.ConnectAsync(peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente."), ct)
-                    .ConfigureAwait(false);
-                Console.WriteLine($"[WebSocket] Conectado a {peerUri}");
-                clientConnected = true;
-                readyTcs.TrySetResult(true);
-                _ = Task.Run(() => ReceiveLoopAsync(client, linkedCts.Token));
-                StartPingLoop(linkedCts.Token);
-            }
-            catch (Exception ex)
-            {
-                readyTcs.TrySetException(ex);
-                throw;
-            }
+            await ConnectClientAsync(linkedCts.Token, firstAttempt: true).ConfigureAwait(false);
+            clientMaintainTask = Task.Run(() => MaintainClientConnectionAsync(linkedCts.Token));
         }
 
         public async Task SendAsync(string json)
@@ -135,11 +123,76 @@ namespace SharedCockpitClient.Network
             }
 
             host.Broadcast(json);
-            if (!IsInternalPayload(json))
-            {
-                Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
-            }
             await Task.CompletedTask;
+        }
+
+        private async Task ConnectClientAsync(CancellationToken token, bool firstAttempt)
+        {
+            var uri = peerUri ?? throw new InvalidOperationException("Peer no especificado para modo cliente.");
+            var ws = new ClientWebSocket();
+
+            try
+            {
+                Console.WriteLine($"[WebSocket] 🔗 Conectando a {uri}...");
+                await ws.ConnectAsync(uri, token).ConfigureAwait(false);
+                Console.WriteLine($"[WebSocket] ✅ Conectado a {uri}");
+
+                var previous = Interlocked.Exchange(ref client, ws);
+                previous?.Dispose();
+
+                clientConnected = true;
+                readyTcs.TrySetResult(true);
+                StartPingLoop(token);
+                _ = Task.Run(() => ReceiveLoopAsync(ws, token));
+            }
+            catch (Exception ex)
+            {
+                ws.Dispose();
+                if (firstAttempt)
+                {
+                    readyTcs.TrySetException(ex);
+                    throw;
+                }
+
+                throw;
+            }
+        }
+
+        private async Task MaintainClientConnectionAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                if (IsConnected)
+                {
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(1), token).ConfigureAwait(false);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+
+                    continue;
+                }
+
+                try
+                {
+                    await ConnectClientAsync(token, firstAttempt: false).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[WebSocket] ⚠️ Reintento fallido: {ex.Message}");
+                    try
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
+                    }
+                    catch (TaskCanceledException)
+                    {
+                        break;
+                    }
+                }
+            }
         }
 
         private void HandleHostMessage(string json)
@@ -153,10 +206,6 @@ namespace SharedCockpitClient.Network
             }
 
             host?.Broadcast(json);
-            if (!IsInternalPayload(json))
-            {
-                Console.WriteLine("[Broadcast] Rebroadcast a clientes (serverTime sellado)");
-            }
             DispatchMessage(json);
         }
 
@@ -211,6 +260,14 @@ namespace SharedCockpitClient.Network
             }
 
             clientConnected = false;
+            if (!ct.IsCancellationRequested)
+            {
+                Console.WriteLine("[WebSocket] ⚠️ Conexión perdida. Reintentando...");
+            }
+
+            if (ReferenceEquals(client, ws))
+                client = null;
+            try { ws.Dispose(); } catch { }
         }
 
         private static string MaybeDecompress(string message)
@@ -434,6 +491,12 @@ namespace SharedCockpitClient.Network
                 linkedCts?.Dispose();
                 clientConnected = false;
                 client?.Dispose();
+                client = null;
+                if (clientMaintainTask != null)
+                {
+                    try { clientMaintainTask.Wait(500); } catch { }
+                    clientMaintainTask = null;
+                }
             }
 
             StopPingLoop();
@@ -507,6 +570,12 @@ namespace SharedCockpitClient.Network
                     rttSamples.Dequeue();
 
                 averageRtt = rttSamples.Count == 0 ? 0 : rttSamples.Average();
+            }
+
+            if ((DateTime.UtcNow - lastPingLogUtc).TotalSeconds >= 5)
+            {
+                Console.WriteLine($"[WebSocket] 🔁 Ping {rtt:0}ms");
+                lastPingLogUtc = DateTime.UtcNow;
             }
         }
 

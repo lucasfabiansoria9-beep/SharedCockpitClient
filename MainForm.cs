@@ -4,11 +4,6 @@ using System.Drawing;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-using SharedCockpitClient.FlightData;
-using SharedCockpitClient.Network;
-using SharedCockpitClient.Persistence;
-using SharedCockpitClient.Sync;
-
 namespace SharedCockpitClient
 {
     /// <summary>
@@ -57,8 +52,7 @@ namespace SharedCockpitClient
                 }
 
                 Console.WriteLine("──────────────────────────────────────────────");
-                Console.WriteLine("✈️  SharedCockpitClient iniciado");
-                Console.WriteLine($"[Boot] Versión: 6.1 | Role={GlobalFlags.Role} | Room={GlobalFlags.RoomName} | Public={GlobalFlags.IsPublicRoom}");
+                Console.WriteLine($"[Boot] Rol seleccionado: {GlobalFlags.Role.ToUpperInvariant()} | Sala: {GlobalFlags.RoomName}");
                 Console.WriteLine("──────────────────────────────────────────────\n");
 
                 var previous = await _snapshotStore.LoadAsync(default);
@@ -69,16 +63,6 @@ namespace SharedCockpitClient
                 Uri? peerUri = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
                     ? null
                     : new Uri($"ws://{GlobalFlags.PeerAddress}:8081");
-
-                if (isHost)
-                {
-                    var visibility = GlobalFlags.IsPublicRoom ? "Pública" : "Privada";
-                    Console.WriteLine($"[WebSocket] 🛰️ Sala creada: {GlobalFlags.RoomName} ({visibility})");
-                }
-                else
-                {
-                    Console.WriteLine($"[WebSocket] 🔗 Conectando al host {GlobalFlags.PeerAddress}...");
-                }
 
                 _wsManager = new WebSocketManager(isHost, peerUri);
                 _wsCts = new CancellationTokenSource();
@@ -97,7 +81,14 @@ namespace SharedCockpitClient
                 }
 
                 _simManager.Start();
-                LabConsole.StartIfEnabledAndOffline(_simManager);
+                if (isHost)
+                {
+                    Console.WriteLine("[RealtimeSync] 🛰 Host en ws://0.0.0.0:8081");
+                }
+                else if (peerUri != null)
+                {
+                    Console.WriteLine($"[RealtimeSync] 🛰 Cliente conectado a {peerUri}");
+                }
                 await _simManager.WaitForCockpitReadyAsync();
                 Console.WriteLine("[Boot] 🧩 Cabina lista, activando sincronización RT...");
 
@@ -279,29 +270,24 @@ namespace SharedCockpitClient
             if (snapshotCopy?.TryGetDouble("PLANE ALTITUDE", out var altVal) == true)
                 alt = altVal.ToString("0");
 
-            var wsState = _wsManager?.IsConnected == true ? "🟢" : "🔴";
-            var simState = _simManager?.IsConnected == true ? "🟢" : "⚪";
-            var ping = _wsManager?.AverageRttMs ?? -1;
+            var wsConnected = _wsManager?.IsConnected == true;
             var fps = _simManager?.LastFps ?? -1;
-            var sync = _realtimeSync?.IsActive == true ? "🟢" : "🕓";
-            var rate = _realtimeSync?.CurrentDiffRate ?? 0;
+            var varsCount = snapshotCopy?.Values?.Count ?? 0;
+            var driftSeconds = snapshotCopy != null
+                ? Math.Max(0, (DateTime.UtcNow - snapshotCopy.TimestampUtc).TotalSeconds)
+                : 0;
 
-            var simConnectState = _simManager?.IsConnected == true ? "Conectado" : "Offline";
-            var hudStatus = $"[HUD] 🧭 Rol activo: {GlobalFlags.Role} | Sala: {GlobalFlags.RoomName} | MSFS: {simConnectState}";
-            if (!string.Equals(_lastHudStatus, hudStatus, StringComparison.Ordinal))
+            var status = $"[HUD] Role: {GlobalFlags.Role.ToUpperInvariant()} | WS: {(wsConnected ? "Connected" : "Offline")} | " +
+                         $"FPS: {(fps < 0 ? "--" : fps.ToString("0"))} | Vars: {varsCount} | Drift: {driftSeconds:0.00}s";
+
+            if (!string.Equals(_lastHudStatus, status, StringComparison.Ordinal))
             {
-                Console.WriteLine(hudStatus);
-                _lastHudStatus = hudStatus;
+                Console.WriteLine(status);
+                _lastHudStatus = status;
             }
 
-            var roleLabel = string.IsNullOrWhiteSpace(GlobalFlags.RoomName)
-                ? $"ROL {GlobalFlags.Role}"
-                : $"ROL {GlobalFlags.Role} | SALA {GlobalFlags.RoomName}";
-
-            _hudLabel.Text =
-                $"{roleLabel}\nIAS {ias} kt\nALT {alt} ft\nSIM {simState}\nWS {wsState}\n" +
-                $"Ping {(ping < 0 ? "—" : ping.ToString("0"))} ms\nFPS {(fps < 0 ? "—" : fps.ToString("0"))}\n" +
-                $"Sync {sync}\nDiffRate {rate:0.0}/s";
+            _hudLabel.Text = status +
+                $"\nIAS {ias} kt | ALT {alt} ft | WS {(wsConnected ? "🟢" : "🔴")}";
 
             PositionHud();
         }

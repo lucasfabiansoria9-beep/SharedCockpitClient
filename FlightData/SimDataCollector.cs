@@ -4,7 +4,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace SharedCockpitClient.FlightData
+namespace SharedCockpitClient
 {
     /// <summary>
     /// Encargado de sondear SimConnect (o su mock) y emitir snapshots incrementales.

@@ -4,7 +4,7 @@ using System.Globalization;
 using System.Linq;
 using System.Text.Json;
 
-namespace SharedCockpitClient.FlightData;
+namespace SharedCockpitClient;
 
 public sealed class SimDiffEngine
 {

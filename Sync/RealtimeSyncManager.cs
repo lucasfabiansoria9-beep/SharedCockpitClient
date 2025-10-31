@@ -4,10 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Threading;
-using SharedCockpitClient.FlightData;
-using SharedCockpitClient.Network;
-
-namespace SharedCockpitClient.Sync
+namespace SharedCockpitClient
 {
     public class RealtimeSyncManager : IDisposable
     {

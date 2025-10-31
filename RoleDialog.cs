@@ -16,8 +16,14 @@ namespace SharedCockpitClient
             {
                 rbClient.Checked = true;
             }
+            else
+            {
+                rbHost.Checked = true;
+            }
 
-            txtPeerAddress.Text = GlobalFlags.PeerAddress ?? string.Empty;
+            txtPeerAddress.Text = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
+                ? string.Empty
+                : GlobalFlags.PeerAddress;
             txtRoomName.Text = GlobalFlags.RoomName ?? string.Empty;
             chkPublic.Checked = GlobalFlags.IsPublicRoom;
 
@@ -71,8 +77,6 @@ namespace SharedCockpitClient
             GlobalFlags.IsPublicRoom = chkPublic.Checked;
             GlobalFlags.PeerAddress = peer;
 
-            Properties.Settings.Default["PeerAddress"] = GlobalFlags.PeerAddress;
-            Properties.Settings.Default.Save();
         }
     }
 }

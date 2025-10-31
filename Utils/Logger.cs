@@ -1,6 +1,6 @@
 using System;
 
-namespace SharedCockpitClient.Utils;
+namespace SharedCockpitClient;
 
 public static class Logger
 {

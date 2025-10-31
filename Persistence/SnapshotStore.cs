@@ -6,15 +6,14 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
-using SharedCockpitClient.FlightData;
-
-namespace SharedCockpitClient.Persistence
+namespace SharedCockpitClient
 {
     public sealed class SnapshotStore
     {
         private readonly string? _customPath;
         private DateTime _lastSaveUtc = DateTime.MinValue;
         private string _lastHash = string.Empty;
+        private readonly Dictionary<string, object?> _lastSavedState = new(StringComparer.OrdinalIgnoreCase);
 
         public SnapshotStore(string? customPath = null)
         {
@@ -41,12 +40,6 @@ namespace SharedCockpitClient.Persistence
 
             snap.CompactInPlace();
 
-            if (snap.Values == null || snap.Values.Count == 0)
-            {
-                Console.WriteLine("[SnapshotStore] ⚠️ Snapshot vacío omitido (sin cambios detectados)");
-                return;
-            }
-
             if ((DateTime.UtcNow - _lastSaveUtc).TotalSeconds < 2)
                 return;
 
@@ -56,12 +49,19 @@ namespace SharedCockpitClient.Persistence
             if (hash == _lastHash)
                 return;
 
+            var changes = CountChanges(snap.Values);
+            if (changes == 0)
+            {
+                return;
+            }
+
             _lastHash = hash;
             var path = GetUserSnapshotPath();
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
             _lastSaveUtc = DateTime.UtcNow;
-            Console.WriteLine("[SnapshotStore] ✅ Guardado");
+            Console.WriteLine($"[SnapshotStore] ✅ Guardado ({changes} variables modificadas)");
+            UpdateLastState(snap.Values);
         }
 
         public Task SaveAsync(IReadOnlyDictionary<string, object?> snapshot, CancellationToken ct)
@@ -71,6 +71,34 @@ namespace SharedCockpitClient.Persistence
 
             var snap = new SimStateSnapshot(new Dictionary<string, object?>(snapshot, StringComparer.OrdinalIgnoreCase));
             return SaveIfChangedAsync(snap, ct);
+        }
+
+        private int CountChanges(IReadOnlyDictionary<string, object?> values)
+        {
+            var changes = 0;
+
+            foreach (var kv in values)
+            {
+                if (!_lastSavedState.TryGetValue(kv.Key, out var previous) || !Equals(previous, kv.Value))
+                    changes++;
+            }
+
+            foreach (var key in _lastSavedState.Keys)
+            {
+                if (!values.ContainsKey(key))
+                    changes++;
+            }
+
+            return changes;
+        }
+
+        private void UpdateLastState(IReadOnlyDictionary<string, object?> values)
+        {
+            _lastSavedState.Clear();
+            foreach (var kv in values)
+            {
+                _lastSavedState[kv.Key] = kv.Value;
+            }
         }
 
         private string GetUserSnapshotPath()

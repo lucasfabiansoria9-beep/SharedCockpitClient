@@ -25,26 +25,15 @@
 
   <ItemGroup>
     <Reference Include="Microsoft.FlightSimulator.SimConnect">
-      <HintPath>libs\Microsoft.FlightSimulator.SimConnect.dll</HintPath>
+      <HintPath>libs\native\win-x64\SimConnect.dll</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="libs\Microsoft.FlightSimulator.SimConnect.dll">
+    <Content Include="libs\native\win-x64\SimConnect.dll">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </Content>
-    <Content Include="libs\SimConnect.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </Content>
-    <Content Include="libs\native\win-x64\**\*.dll">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
-    </Content>
-    <Content Include="Panel\**\*.*">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
     <Content Include="scripts\**\*.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

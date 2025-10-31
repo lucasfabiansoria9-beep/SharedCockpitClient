@@ -8,10 +8,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Xml.Linq;
-using SharedCockpitClient.FlightData;
-using SharedCockpitClient.Utils;
 
-namespace SharedCockpitClient.Tools
+namespace SharedCockpitClient
 {
     public sealed record SimVarCatalog(IReadOnlyList<SimVarDescriptor> SimVars, IReadOnlyList<SimEventDescriptor> SimEvents)
     {
