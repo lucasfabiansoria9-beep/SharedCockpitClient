@@ -5,7 +5,17 @@
   dotnet publish "SharedCockpitClient.csproj" -c Release -r win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:PublishTrimmed=false -o "E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish"
   -->
 
-  <PropertyGroup Condition="!Exists('libs\\native\\win-x64\\SimConnect.dll')">
+  <ItemGroup>
+    <SimConnectManaged Include="libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll" Condition="Exists('%(Identity)')" />
+    <SimConnectManaged Include="SDKResources\**\Microsoft.FlightSimulator.SimConnect.dll" Condition="Exists('%(Identity)')" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <SimConnectNative Include="libs\native\win-x64\SimConnect.dll" Condition="Exists('%(Identity)')" />
+    <SimConnectNative Include="SDKResources\**\SimConnect.dll" Condition="Exists('%(Identity)')" />
+  </ItemGroup>
+
+  <PropertyGroup Condition="'@(SimConnectManaged)' == ''">
     <DefineConstants>$(DefineConstants);SIMCONNECT_STUB</DefineConstants>
   </PropertyGroup>
 
@@ -35,33 +45,36 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
+    <Compile Include="**\*.cs" Exclude="bin\**;obj\**;Stubs\SimConnectStub.cs" />
   </ItemGroup>
 
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
-  <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
+  <ItemGroup Condition="'@(SimConnectManaged)' != ''">
     <Reference Include="Microsoft.FlightSimulator.SimConnect">
-      <HintPath>libs\native\win-x64\SimConnect.dll</HintPath>
+      <HintPath>@(SimConnectManaged->'%(Identity)')</HintPath>
       <Private>true</Private>
     </Reference>
   </ItemGroup>
 
-  <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
-    <Content Include="libs\native\win-x64\SimConnect.dll">
+  <ItemGroup Condition="'@(SimConnectManaged)' == ''">
+    <Compile Include="Stubs\SimConnectStub.cs" />
+  </ItemGroup>
+
+  <ItemGroup Condition="'@(SimConnectManaged)' != ''">
+    <Content Include="@(SimConnectManaged)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>Always</CopyToPublishDirectory>
     </Content>
   </ItemGroup>
 
-  <ItemGroup>
-    <Compile Remove="Stubs\SimConnectStub.cs" />
-  </ItemGroup>
-
-  <ItemGroup Condition="!Exists('libs\\native\\win-x64\\SimConnect.dll')">
-    <Compile Include="Stubs\SimConnectStub.cs" />
+  <ItemGroup Condition="'@(SimConnectNative)' != ''">
+    <Content Include="@(SimConnectNative)">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </Content>
   </ItemGroup>
 
   <ItemGroup>
@@ -84,17 +97,17 @@
   </Target>
 
   <Target Name="CopyNativeSimConnect" AfterTargets="Build;Publish">
-    <ItemGroup>
-      <NativeSimConnect Include="libs\native\win-x64\**\*.dll" />
+    <ItemGroup Condition="'@(SimConnectManaged)' != '' Or '@(SimConnectNative)' != ''">
+      <SimConnectPayload Include="@(SimConnectManaged);@(SimConnectNative)" />
     </ItemGroup>
-    <Copy SourceFiles="@(NativeSimConnect)"
+    <Copy SourceFiles="@(SimConnectPayload)"
           DestinationFolder="$(OutDir)"
           SkipUnchangedFiles="true"
-          Condition="'@(NativeSimConnect)' != '' and '$(OutDir)' != ''" />
-    <Copy SourceFiles="@(NativeSimConnect)"
+          Condition="'@(SimConnectPayload)' != '' and '$(OutDir)' != ''" />
+    <Copy SourceFiles="@(SimConnectPayload)"
           DestinationFolder="$(PublishDir)"
           SkipUnchangedFiles="true"
-          Condition="'@(NativeSimConnect)' != '' and '$(PublishDir)' != ''" />
+          Condition="'@(SimConnectPayload)' != '' and '$(PublishDir)' != ''" />
   </Target>
 
 
