@@ -10,6 +10,11 @@
   </PropertyGroup>
 
   <PropertyGroup>
+    <NoWarn>IDE0051,CA1822,CS1591</NoWarn>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <PropertyGroup>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>

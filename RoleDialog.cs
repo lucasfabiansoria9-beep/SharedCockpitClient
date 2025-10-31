@@ -4,6 +4,7 @@ using System.Linq;
 using System.Windows.Forms;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Session;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -75,7 +76,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[Discovery] ❌ No se pudo iniciar listener: {ex.Message}");
+                Logger.Error($"[Discovery] ❌ No se pudo iniciar listener: {ex.Message}");
             }
         }
 

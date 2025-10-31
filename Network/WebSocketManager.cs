@@ -7,6 +7,7 @@ using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Linq;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -68,21 +69,21 @@ namespace SharedCockpitClient
                 var listenPort = configuredPort ?? peerUri?.Port ?? 8081;
                 host = new WebSocketHost(listenPort);
                 host.OnMessage += HandleHostMessage;
-                host.OnClientConnected += id => Console.WriteLine($"[WebSocket] 👥 Cliente conectado ({id})");
-                host.OnClientDisconnected += id => Console.WriteLine($"[WebSocket] 👋 Cliente desconectado ({id})");
+                host.OnClientConnected += id => Logger.Info($"[WebSocket] 👥 Cliente conectado ({id})");
+                host.OnClientDisconnected += id => Logger.Info($"[WebSocket] 👋 Cliente desconectado ({id})");
 
                 _ = Task.Run(() =>
                 {
                     try
                     {
                         host.Start();
-                        Console.WriteLine($"[WebSocket] 🛰 Host escuchando en ws://0.0.0.0:{listenPort}");
+                        Logger.Info($"[WebSocket] 🛰 Host escuchando en ws://0.0.0.0:{listenPort}");
                         readyTcs.TrySetResult(true);
                     }
                     catch (Exception ex)
                     {
                         readyTcs.TrySetException(ex);
-                        Console.WriteLine($"[WebSocket] ❌ Error iniciando host: {ex.Message}");
+                        Logger.Error($"[WebSocket] ❌ Error iniciando host: {ex.Message}");
                     }
                 }, ct);
 
@@ -134,9 +135,9 @@ namespace SharedCockpitClient
 
             try
             {
-                Console.WriteLine($"[WebSocket] 🔗 Conectando a {uri}...");
+            Logger.Info($"[WebSocket] 🔗 Conectando a {uri}...");
                 await ws.ConnectAsync(uri, token).ConfigureAwait(false);
-                Console.WriteLine($"[WebSocket] ✅ Conectado a {uri}");
+            Logger.Info($"[WebSocket] ✅ Conectado a {uri}");
 
                 var previous = Interlocked.Exchange(ref client, ws);
                 previous?.Dispose();
@@ -183,7 +184,7 @@ namespace SharedCockpitClient
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[WebSocket] ⚠️ Reintento fallido: {ex.Message}");
+                    Logger.Warn($"[WebSocket] ⚠️ Reintento fallido: {ex.Message}");
                     try
                     {
                         await Task.Delay(TimeSpan.FromSeconds(3), token).ConfigureAwait(false);
@@ -263,7 +264,7 @@ namespace SharedCockpitClient
             clientConnected = false;
             if (!ct.IsCancellationRequested)
             {
-                Console.WriteLine("[WebSocket] ⚠️ Conexión perdida. Reintentando...");
+                Logger.Warn("[WebSocket] ⚠️ Conexión perdida. Reintentando...");
             }
 
             if (ReferenceEquals(client, ws))
@@ -541,7 +542,7 @@ namespace SharedCockpitClient
                     }
                     catch (Exception ex)
                     {
-                        Console.WriteLine($"[WebSocket] ⚠️ Error enviando ping: {ex.Message}");
+                        Logger.Warn($"[WebSocket] ⚠️ Error enviando ping: {ex.Message}");
                     }
                 }
             }, token);
@@ -593,7 +594,7 @@ namespace SharedCockpitClient
 
             if ((DateTime.UtcNow - lastPingLogUtc).TotalSeconds >= 5)
             {
-                Console.WriteLine($"[WebSocket] 🔁 Ping {rtt:0}ms");
+                Logger.Debug($"[WebSocket] 🔁 Ping {rtt:0}ms");
                 lastPingLogUtc = DateTime.UtcNow;
             }
         }

@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using SharedCockpitClient.Network;
 using SharedCockpitClient.Session;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -357,7 +358,7 @@ namespace SharedCockpitClient
                     txtLog.AppendText(Environment.NewLine);
                 txtLog.AppendText(line);
             }
-            Console.WriteLine(line);
+            Logger.Info(line);
         }
 
         private void UpdateNetworkStatus(string text, string consoleText)
@@ -373,7 +374,7 @@ namespace SharedCockpitClient
 
             _currentNetworkStatus = text;
             lblNetworkValue.Text = text;
-            Console.WriteLine($"[Network] {consoleText}");
+            Logger.Info($"[Network] {consoleText}");
         }
 
         private void UpdateLatency(double latencyMs)

@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
 {
@@ -93,7 +94,7 @@ namespace SharedCockpitClient
                 }
                 catch (Exception ex)
                 {
-                    Console.WriteLine($"[SimCollector] ⚠️ Error en loop: {ex.Message}");
+                    Logger.Warn($"[SimCollector] ⚠️ Error en loop: {ex.Message}");
                 }
 
                 try
@@ -138,7 +139,7 @@ namespace SharedCockpitClient
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimCollector] ⚠️ Error procesando diff: {ex.Message}");
+                Logger.Warn($"[SimCollector] ⚠️ Error procesando diff: {ex.Message}");
             }
 
             return null;
