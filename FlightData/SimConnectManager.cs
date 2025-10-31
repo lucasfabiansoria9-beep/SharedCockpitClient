@@ -329,11 +329,17 @@ namespace SharedCockpitClient
                     case SimDataType.Float32 or SimDataType.Float64:
                         simConnect.RegisterDataDefineStruct<double>(ToSimConnect(definitionId));
                         break;
+
                     case SimDataType.Int32 or SimDataType.Bool:
                         simConnect.RegisterDataDefineStruct<int>(ToSimConnect(definitionId));
                         break;
+
                     case SimDataType.String256:
                         simConnect.RegisterDataDefineStruct<string>(ToSimConnect(definitionId));
+                        break;
+
+                    default:
+                        Logger.Warn($"[SimConnect] ⚠️ Tipo de dato no manejado en RegisterStructForDescriptor: {type}");
                         break;
                 }
             }
