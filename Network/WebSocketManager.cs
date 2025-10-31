@@ -424,6 +424,20 @@ namespace SharedCockpitClient
                 if (root.TryGetProperty("timestamp", out var tsProp) && tsProp.ValueKind == JsonValueKind.Number)
                     timestamp = tsProp.GetInt64();
 
+                double serverTime = 0;
+                if (root.TryGetProperty("serverTime", out var serverProp) && serverProp.ValueKind == JsonValueKind.Number)
+                {
+                    if (serverProp.TryGetInt64(out var serverLong))
+                        serverTime = serverLong;
+                    else
+                        serverTime = serverProp.GetDouble();
+                }
+
+                if (serverTime <= 0 && timestamp > 0)
+                    serverTime = timestamp;
+                else if (timestamp <= 0 && serverTime > 0)
+                    timestamp = (long)Math.Round(serverTime);
+
                 string? target = null;
                 if (root.TryGetProperty("target", out var targetProp) && targetProp.ValueKind == JsonValueKind.String)
                     target = targetProp.GetString();
@@ -436,7 +450,7 @@ namespace SharedCockpitClient
                 else if (root.TryGetProperty("data", out var dataProp))
                     value = ReadJsonValue(dataProp);
 
-                OnCommand?.Invoke(new CommandPayload(command!, originId, sequence, timestamp, target, value));
+                OnCommand?.Invoke(new CommandPayload(command!, originId, sequence, serverTime, target, value));
             }
             catch (JsonException)
             {

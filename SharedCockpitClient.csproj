@@ -32,6 +32,10 @@
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="System.Text.Json" Version="8.0.5" />
+  </ItemGroup>
+
   <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
     <Reference Include="Microsoft.FlightSimulator.SimConnect">
       <HintPath>libs\native\win-x64\SimConnect.dll</HintPath>

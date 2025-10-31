@@ -11,10 +11,12 @@ namespace SharedCockpitClient
         string Command,
         string? OriginId,
         long Sequence,
-        long Timestamp,
+        double ServerTime,
         string? Target,
         object? Value)
     {
+        public long Timestamp => (long)ServerTime;
+
         public string NormalizedCommand => string.IsNullOrWhiteSpace(Command)
             ? string.Empty
             : SimDataDefinition.NormalizeEventName(Command);

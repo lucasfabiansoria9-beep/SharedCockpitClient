@@ -11,20 +11,20 @@ namespace SharedCockpitClient
     {
         public string Command { get; set; } = string.Empty;
 
-        public Guid OriginId { get; set; }
-            = Guid.Empty;
-
-        public long Sequence { get; set; }
-            = 0;
-
-        public long Timestamp { get; set; }
-            = 0;
-
         public object? Value { get; set; }
             = null;
 
         public string? Target { get; set; }
             = null;
+
+        public string OriginId { get; set; }
+            = string.Empty;
+
+        public long Sequence { get; set; }
+            = 0;
+
+        public double ServerTime { get; set; }
+            = 0;
 
         public string NormalizedCommand => string.IsNullOrWhiteSpace(Command)
             ? string.Empty

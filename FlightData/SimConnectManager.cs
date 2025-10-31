@@ -29,6 +29,7 @@ namespace SharedCockpitClient
         private readonly Dictionary<string, uint> _eventClientByName = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<uint, DateTime> _pendingEventEcho = new();
         private readonly Guid _localInstanceId = Guid.NewGuid();
+        private readonly string _localInstanceKey;
         private long _commandSequence;
         private long _snapshotSequence;
 
@@ -46,9 +47,13 @@ namespace SharedCockpitClient
 
         public Guid LocalInstanceId => _localInstanceId;
 
+        public string LocalInstanceKey => _localInstanceKey;
+
         public SimConnectManager(AircraftStateManager aircraftState)
         {
             _aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
+
+            _localInstanceKey = _localInstanceId.ToString("N");
 
 #if SIMCONNECT_STUB
             Console.WriteLine("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para compilación. La sincronización en vivo requiere la DLL real.");
@@ -256,9 +261,9 @@ namespace SharedCockpitClient
             var message = new SimCommandMessage
             {
                 Command = normalized,
-                OriginId = _localInstanceId,
+                OriginId = _localInstanceKey,
                 Sequence = sequence,
-                Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                 Target = descriptor.Path,
                 Value = data.dwData
             };

@@ -17,8 +17,7 @@ namespace SharedCockpitClient
         private double currentDiffRate;
         private DateTime _firstSnapshotUtc = DateTime.MinValue;
         private const int WARMUP_MS = 1000;
-        private readonly Dictionary<Guid, long> _lastSequenceByOrigin = new();
-        private readonly Guid _localInstanceGuid;
+        private readonly Dictionary<string, long> _lastSequenceByOrigin = new(StringComparer.OrdinalIgnoreCase);
         private readonly string _localInstanceId;
         private long _localSequence;
 
@@ -29,8 +28,9 @@ namespace SharedCockpitClient
             this.simManager = simManager ?? throw new ArgumentNullException(nameof(simManager));
             this.websocket = websocket ?? throw new ArgumentNullException(nameof(websocket));
 
-            _localInstanceGuid = simManager.LocalInstanceId;
-            _localInstanceId = _localInstanceGuid.ToString("N");
+            _localInstanceId = !string.IsNullOrWhiteSpace(simManager.LocalInstanceKey)
+                ? simManager.LocalInstanceKey
+                : simManager.LocalInstanceId.ToString("N");
 
             this.simManager.OnCommand += HandleLocalCommand;
             this.websocket.OnCommand += HandleRemoteCommand;
@@ -241,8 +241,8 @@ namespace SharedCockpitClient
             if (command == null)
                 return;
 
-            if (command.Timestamp <= 0)
-                command.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            if (command.ServerTime <= 0)
+                command.ServerTime = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
             var sequence = Interlocked.Increment(ref _localSequence);
             var payload = JsonSerializer.Serialize(new
@@ -250,7 +250,8 @@ namespace SharedCockpitClient
                 type = "command",
                 originId = _localInstanceId,
                 sequence,
-                timestamp = command.Timestamp,
+                timestamp = command.ServerTime,
+                serverTime = command.ServerTime,
                 command = command.Command,
                 target = command.Target,
                 value = command.Value
@@ -269,18 +270,15 @@ namespace SharedCockpitClient
                 string.Equals(payload.OriginId, _localInstanceId, StringComparison.OrdinalIgnoreCase))
                 return;
 
-            var originGuid = Guid.Empty;
-            if (!string.IsNullOrWhiteSpace(payload.OriginId))
-                Guid.TryParse(payload.OriginId, out originGuid);
-
             lock (syncLock)
             {
-                if (originGuid != Guid.Empty)
+                if (!string.IsNullOrWhiteSpace(payload.OriginId))
                 {
-                    if (_lastSequenceByOrigin.TryGetValue(originGuid, out var lastSeq) && payload.Sequence <= lastSeq)
+                    var origin = payload.OriginId!;
+                    if (_lastSequenceByOrigin.TryGetValue(origin, out var lastSeq) && payload.Sequence <= lastSeq)
                         return;
 
-                    _lastSequenceByOrigin[originGuid] = payload.Sequence;
+                    _lastSequenceByOrigin[origin] = payload.Sequence;
                 }
             }
 
