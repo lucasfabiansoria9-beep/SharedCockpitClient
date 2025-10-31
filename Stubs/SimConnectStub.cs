@@ -1,8 +1,12 @@
 using System;
+using System.Linq;
 using System.Threading.Tasks;
 
 namespace Microsoft.FlightSimulator.SimConnect
 {
+    // -------------------------------------------------------------------------
+    // ----- BEGIN SIMCONNECT STUB (used when the native SimConnect.dll is missing)
+    // -------------------------------------------------------------------------
     /// <summary>
     /// Minimal managed stub for the Microsoft Flight Simulator SimConnect API.
     /// Provides enough surface area for offline compilation and laboratory mode execution.
@@ -121,10 +125,11 @@ namespace Microsoft.FlightSimulator.SimConnect
         /// </summary>
         public void RaiseSimobjectData(uint requestId, params object?[] data)
         {
+            var payload = data?.Cast<object>().ToArray() ?? Array.Empty<object>();
             OnRecvSimobjectData?.Invoke(this, new SIMCONNECT_RECV_SIMOBJECT_DATA
             {
                 dwRequestID = requestId,
-                dwData = data
+                dwData = payload
             });
         }
 
@@ -228,7 +233,7 @@ namespace Microsoft.FlightSimulator.SimConnect
         public uint dwentrynumber;
         public uint dwoutof;
         public uint dwDefineCount;
-        public object[]? dwData;
+        public object[] dwData;
     }
 
     public struct SIMCONNECT_RECV_EXCEPTION
@@ -242,4 +247,7 @@ namespace Microsoft.FlightSimulator.SimConnect
     {
         NONE = 0
     }
+    // -------------------------------------------------------------------------
+    // ----- END SIMCONNECT STUB -----------------------------------------------
+    // -------------------------------------------------------------------------
 }

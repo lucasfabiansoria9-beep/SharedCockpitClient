@@ -88,30 +88,10 @@ namespace SharedCockpitClient
                 _simConnect = new SimConnect("SharedCockpitClient", _windowHandle, 0, null, 0);
                 OnSimConnectOpened();
 
-                _simConnect.OnRecvOpen += (_, _) => OnSimConnectOpened();
-                _simConnect.OnRecvQuit += (_, _) =>
-                {
-                    Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
-                    _simConnect?.Dispose();
-                    _simConnect = null;
-                    IsConnected = false;
-                    _offlineMode = true;
-                    _initialSnapshotQueued = false;
-                    StartOfflineLoop();
-                };
-                _simConnect.OnRecvException += (_, ex) =>
-                    Console.WriteLine($"[SimConnect] ⚠️ Excepción: {ex.dwException}");
-                _simConnect.OnRecvSimobjectData += (_, data) =>
-                {
-                    try
-                    {
-                        OnRecvSimobjectData(data);
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[SimConnect] ⚠️ Error procesando snapshot: {ex.Message}");
-                    }
-                };
+                _simConnect.OnRecvOpen += HandleSimConnectOpen;
+                _simConnect.OnRecvQuit += HandleSimConnectQuit;
+                _simConnect.OnRecvException += HandleSimConnectException;
+                _simConnect.OnRecvSimobjectData += HandleSimConnectSimobjectData;
                 _simConnect.OnRecvEvent += HandleSimConnectEvent;
 
                 var registeredVars = RegisterSimVarSubscriptions();
@@ -236,7 +216,40 @@ namespace SharedCockpitClient
             return registered;
         }
 
-        private void HandleSimConnectEvent(SimConnect sender, SIMCONNECT_RECV_EVENT data)
+        private void HandleSimConnectOpen(object sender, EventArgs e)
+        {
+            OnSimConnectOpened();
+        }
+
+        private void HandleSimConnectQuit(object sender, EventArgs e)
+        {
+            Console.WriteLine("[SimConnect] ❌ Sesión cerrada.");
+            _simConnect?.Dispose();
+            _simConnect = null;
+            IsConnected = false;
+            _offlineMode = true;
+            _initialSnapshotQueued = false;
+            StartOfflineLoop();
+        }
+
+        private void HandleSimConnectException(object sender, SIMCONNECT_RECV_EXCEPTION data)
+        {
+            Console.WriteLine($"[SimConnect] ⚠️ Excepción: {data.dwException}");
+        }
+
+        private void HandleSimConnectSimobjectData(object sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        {
+            try
+            {
+                ProcessSimobjectData(data);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SimConnect] ⚠️ Error procesando snapshot: {ex.Message}");
+            }
+        }
+
+        private void HandleSimConnectEvent(object sender, SIMCONNECT_RECV_EVENT data)
         {
             if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
                 return;
@@ -264,8 +277,7 @@ namespace SharedCockpitClient
             OnCommand?.Invoke(message);
         }
 
-
-        private void OnRecvSimobjectData(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void ProcessSimobjectData(SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
             if (data.dwRequestID == 0 || !_requestToDescriptor.TryGetValue(data.dwRequestID, out var descriptor))
                 return;
