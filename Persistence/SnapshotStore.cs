@@ -7,6 +7,8 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
+using SharedCockpitClient.Utils;
+
 namespace SharedCockpitClient
 {
     public sealed class SnapshotStore
@@ -30,7 +32,7 @@ namespace SharedCockpitClient
             var json = await File.ReadAllTextAsync(path, ct).ConfigureAwait(false);
             var snap = JsonSerializer.Deserialize<SimStateSnapshot>(json) ?? new SimStateSnapshot();
             snap.CompactInPlace();
-            Console.WriteLine($"[SnapshotStore] Estado restaurado desde {path} ({snap.Data.Count} entradas)");
+            Logger.Info($"[SnapshotStore] Estado restaurado desde {path} ({snap.Data.Count} entradas)");
             return new Dictionary<string, object?>(snap.Data, StringComparer.OrdinalIgnoreCase);
         }
 
@@ -61,7 +63,7 @@ namespace SharedCockpitClient
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             await File.WriteAllTextAsync(path, json, ct).ConfigureAwait(false);
             _lastSaveUtc = DateTime.UtcNow;
-            Console.WriteLine($"[SnapshotStore] ✅ Guardado ({changes} variables modificadas)");
+            Logger.Info($"[SnapshotStore] ✅ Guardado ({changes} variables modificadas)");
             UpdateLastState(snap.Values);
         }
 
