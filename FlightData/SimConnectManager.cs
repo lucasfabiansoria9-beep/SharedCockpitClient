@@ -51,6 +51,10 @@ namespace SharedCockpitClient
         {
             _aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
 
+#if SIMCONNECT_STUB
+            Console.WriteLine("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para laboratorio.");
+#endif
+
             if (GlobalFlags.IsLabMode)
             {
                 if (!IsConnected)
