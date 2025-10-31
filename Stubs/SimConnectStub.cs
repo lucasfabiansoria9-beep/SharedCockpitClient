@@ -213,13 +213,25 @@ namespace Microsoft.FlightSimulator.SimConnect
         GROUPID_IS_PRIORITY = 0x10
     }
 
-    public enum SIMCONNECT_DATA_DEFINITION_ID : uint { }
+    public enum SIMCONNECT_DATA_DEFINITION_ID : uint
+    {
+        Dummy = 0
+    }
 
-    public enum SIMCONNECT_DATA_REQUEST_ID : uint { }
+    public enum SIMCONNECT_DATA_REQUEST_ID : uint
+    {
+        Dummy = 0
+    }
 
-    public enum SIMCONNECT_CLIENT_EVENT_ID : uint { }
+    public enum SIMCONNECT_CLIENT_EVENT_ID : uint
+    {
+        Dummy = 0
+    }
 
-    public enum SIMCONNECT_NOTIFICATION_GROUP_ID : uint { }
+    public enum SIMCONNECT_NOTIFICATION_GROUP_ID : uint
+    {
+        Dummy = 0
+    }
 
     public struct SIMCONNECT_RECV_EVENT
     {

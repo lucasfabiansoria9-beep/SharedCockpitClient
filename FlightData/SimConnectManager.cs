@@ -4,6 +4,10 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.FlightSimulator.SimConnect;
+#if SIMCONNECT_STUB
+using SIMCONNECT_DATA_DEFINITION_ID = System.UInt32;
+using SIMCONNECT_CLIENT_EVENT_ID = System.UInt32;
+#endif
 using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
