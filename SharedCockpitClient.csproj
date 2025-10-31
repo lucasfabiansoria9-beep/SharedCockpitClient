@@ -21,11 +21,16 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
     <Platforms>AnyCPU;x64</Platforms>
     <StartupObject>SharedCockpitClient.Program</StartupObject>
 
     <!-- 🔒 Perfil laboratorio: silencia archivos no usados en Fase 1 -->
   </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
+  </ItemGroup>
 
   <ItemGroup Condition="Exists('libs\\native\\win-x64\\SimConnect.dll')">
     <Reference Include="Microsoft.FlightSimulator.SimConnect">

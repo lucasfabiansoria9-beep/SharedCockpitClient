@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.Threading;
@@ -20,8 +21,6 @@ namespace SharedCockpitClient
         private SimConnect? _simConnect;
         private IntPtr _windowHandle = IntPtr.Zero;
         private CancellationTokenSource? _offlineCts;
-        private Task? _offlineTask;
-        private bool _offlineMode;
         private bool _initialSnapshotQueued;
         private readonly Dictionary<string, object?> lastValues = new(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<uint, SimVarDescriptor> _requestToDescriptor = new();
@@ -52,23 +51,12 @@ namespace SharedCockpitClient
             _aircraftState = aircraftState ?? throw new ArgumentNullException(nameof(aircraftState));
 
 #if SIMCONNECT_STUB
-            Console.WriteLine("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para laboratorio.");
+            Console.WriteLine("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para compilación. La sincronización en vivo requiere la DLL real.");
 #endif
 
-            if (GlobalFlags.IsLabMode)
-            {
-                if (!IsConnected)
-                {
-                    Console.WriteLine("[SimConnect] 🧪 Modo laboratorio activo (sin conexión real).");
-                }
-                _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
-            }
-            else
-            {
-                Console.WriteLine("[SimConnect] 🚀 Inicializando conexión real con MSFS2024...");
-                InitializeSimConnect();
-                _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
-            }
+            Console.WriteLine("[SimConnect] 🚀 Inicializando conexión real con MSFS2024...");
+            InitializeSimConnect();
+            _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
 
             _collector.OnSnapshot += HandleSnapshot;
 
@@ -104,17 +92,14 @@ namespace SharedCockpitClient
                 Console.WriteLine($"[SimConnect] ❌ Error al conectar: {ex.Message}");
                 _simConnect = null;
                 IsConnected = false;
-                _offlineMode = true;
-                StartOfflineLoop();
+                throw;
             }
         }
 
         private void OnSimConnectOpened()
         {
             IsConnected = true;
-            _offlineMode = false;
             StopOfflineLoop();
-            GlobalFlags.DisableLabMode();
             Console.WriteLine("[SimConnect] ✅ Conexión establecida correctamente.");
             lastValues.Clear();
 
@@ -227,9 +212,7 @@ namespace SharedCockpitClient
             _simConnect?.Dispose();
             _simConnect = null;
             IsConnected = false;
-            _offlineMode = true;
             _initialSnapshotQueued = false;
-            StartOfflineLoop();
         }
 
         private void HandleSimConnectException(object sender, SIMCONNECT_RECV_EXCEPTION data)
@@ -270,8 +253,15 @@ namespace SharedCockpitClient
 
             var normalized = SimDataDefinition.NormalizeEventName(descriptor.EventName);
             var sequence = Interlocked.Increment(ref _commandSequence);
-            var message = new SimCommandMessage(normalized, _localInstanceId, sequence,
-                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), descriptor.Path, data.dwData);
+            var message = new SimCommandMessage
+            {
+                Command = normalized,
+                OriginId = _localInstanceId,
+                Sequence = sequence,
+                Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+                Target = descriptor.Path,
+                Value = data.dwData
+            };
 
             Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {normalized} (local)");
             OnCommand?.Invoke(message);
@@ -498,11 +488,6 @@ namespace SharedCockpitClient
             if (_started) return;
             _started = true;
             _collector.Start();
-
-            if (!IsConnected || _offlineMode)
-            {
-                StartOfflineLoop();
-            }
         }
 
         public async Task WaitForCockpitReadyAsync(int timeoutMs = 15000)
@@ -713,69 +698,15 @@ namespace SharedCockpitClient
 
         private void StartOfflineLoop()
         {
-            if (_offlineTask != null && !_offlineTask.IsCompleted)
-                return;
-
             StopOfflineLoop();
             IsConnected = false;
-            _offlineMode = true;
-
-            _offlineCts = new CancellationTokenSource();
-            var token = _offlineCts.Token;
-            _offlineTask = Task.Run(async () =>
-            {
-                Console.WriteLine("[SimConnect] ⚪ Offline (SimConnect no disponible). Reintentando cada 5 s...");
-                LastFps = -1;
-
-                while (!token.IsCancellationRequested && !IsConnected)
-                {
-                    try
-                    {
-                        InitializeSimConnect();
-                        if (IsConnected)
-                            break;
-                    }
-                    catch (Exception ex)
-                    {
-                        Console.WriteLine($"[SimConnect] ⚠️ Reintento fallido: {ex.Message}");
-                    }
-
-                    try
-                    {
-                        await Task.Delay(TimeSpan.FromSeconds(5), token).ConfigureAwait(false);
-                    }
-                    catch (TaskCanceledException)
-                    {
-                        break;
-                    }
-                }
-            }, token);
+            Console.WriteLine("[SimConnect] ⚪ Offline. Requiere reinicio del cliente para reconectar.");
         }
 
         private void StopOfflineLoop()
         {
-            if (_offlineCts == null)
-                return;
-
-            try
-            {
-                _offlineCts.Cancel();
-            }
-            catch
-            {
-            }
-
-            try
-            {
-                _offlineTask?.Wait(500);
-            }
-            catch
-            {
-            }
-
-            _offlineCts.Dispose();
+            _offlineCts?.Dispose();
             _offlineCts = null;
-            _offlineTask = null;
         }
     }
 }

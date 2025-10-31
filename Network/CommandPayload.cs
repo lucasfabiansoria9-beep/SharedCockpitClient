@@ -1,19 +1,22 @@
+#nullable enable
+
 using System;
+
 namespace SharedCockpitClient
 {
     /// <summary>
     /// Representa un comando discreto recibido/enviado por WebSocket.
     /// </summary>
     public sealed record CommandPayload(
-        string Event,
+        string Command,
         string? OriginId,
         long Sequence,
         long Timestamp,
-        string? Path,
+        string? Target,
         object? Value)
     {
-        public string NormalizedEvent => string.IsNullOrWhiteSpace(Event)
+        public string NormalizedCommand => string.IsNullOrWhiteSpace(Command)
             ? string.Empty
-            : SimDataDefinition.NormalizeEventName(Event);
+            : SimDataDefinition.NormalizeEventName(Command);
     }
 }

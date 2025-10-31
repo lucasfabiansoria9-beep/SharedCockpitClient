@@ -1,3 +1,4 @@
+#nullable enable
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -240,6 +241,9 @@ namespace SharedCockpitClient
             if (command == null)
                 return;
 
+            if (command.Timestamp <= 0)
+                command.Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+
             var sequence = Interlocked.Increment(ref _localSequence);
             var payload = JsonSerializer.Serialize(new
             {
@@ -247,12 +251,12 @@ namespace SharedCockpitClient
                 originId = _localInstanceId,
                 sequence,
                 timestamp = command.Timestamp,
-                eventName = command.NormalizedEvent,
-                path = command.SourcePath,
+                command = command.Command,
+                target = command.Target,
                 value = command.Value
             });
 
-            Console.WriteLine($"[RealtimeSync] 🛠 Control enviado: {command.NormalizedEvent}");
+            Console.WriteLine($"[RealtimeSync] 🛠 Control enviado: {command.NormalizedCommand}");
             _ = websocket.SendAsync(payload);
         }
 
@@ -280,8 +284,10 @@ namespace SharedCockpitClient
                 }
             }
 
-            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {payload.Event} (from {payload.OriginId ?? "remote"})");
-            var path = payload.Path ?? payload.NormalizedEvent;
+            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {payload.Command} (from {payload.OriginId ?? "remote"})");
+            var path = payload.Target;
+            if (string.IsNullOrWhiteSpace(path))
+                path = payload.NormalizedCommand;
             _ = simManager.ApplyRemoteChangeAsync(path, payload.Value, CancellationToken.None);
         }
 

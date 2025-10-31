@@ -1,353 +1,490 @@
-﻿using System;
+#nullable enable
+using System;
 using System.Collections.Generic;
-using System.Drawing;
+using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using SharedCockpitClient.Network;
+using SharedCockpitClient.Session;
+
 namespace SharedCockpitClient
 {
-    /// <summary>
-    /// Ventana principal de SharedCockpitClient.
-    /// Orquesta SimConnect, WebSocket, sincronización en tiempo real y persistencia.
-    /// </summary>
     public partial class MainForm : Form
     {
+        private const int DefaultPort = 8081;
+        private readonly StartupSessionInfo _sessionInfo;
         private readonly AircraftStateManager _stateManager = new();
-        private readonly SimConnectManager _simManager;
         private readonly SnapshotStore _snapshotStore = new();
+        private SimConnectManager? _simManager;
         private WebSocketManager? _wsManager;
         private RealtimeSyncManager? _realtimeSync;
-        private CancellationTokenSource? _wsCts;
-        private readonly object _snapshotLock = new();
-        private SimStateSnapshot? _latestSnapshot;
-        private Panel? _hudPanel;
-        private Label? _hudLabel;
-        private System.Windows.Forms.Timer? _hudTimer;   // ✅ corregido
-        private bool _hudVisible;
-        private bool _hudDiagnosticsExpanded;
-        private System.Windows.Forms.Timer? _autosaveTimer;
-        private string? _lastHudStatus;
+        private CancellationTokenSource? _networkCts;
+        private LanDiscoveryBroadcaster? _broadcaster;
+        private readonly object _logLock = new();
+        private int _lastDiffCount;
+        private DateTime? _lastSentUtc;
+        private int _lastSentBytes;
+        private DateTime? _lastReceivedUtc;
+        private int _lastReceivedBytes;
+        private readonly System.Windows.Forms.Timer _latencyTimer;
+        private string _currentNetworkStatus = string.Empty;
 
-        public MainForm()
+        public MainForm(StartupSessionInfo sessionInfo)
         {
+            _sessionInfo = sessionInfo ?? throw new ArgumentNullException(nameof(sessionInfo));
             InitializeComponent();
-            KeyPreview = true;
-            Load += OnLoad;
-            FormClosing += OnFormClosing;
 
-            Console.WriteLine("[MainForm] 🛫 Inicializando cliente compartido...");
-            _simManager = new SimConnectManager(_stateManager);
-        }
+            Load += MainForm_Load;
+            FormClosing += MainForm_FormClosing;
 
-        private async void OnLoad(object? sender, EventArgs e)
-        {
-            try
+            _latencyTimer = new System.Windows.Forms.Timer { Interval = 1000 };
+            _latencyTimer.Tick += (_, __) =>
             {
-                if (string.Equals(GlobalFlags.Role, "none", StringComparison.OrdinalIgnoreCase))
-                {
-                    MessageBox.Show("Debe seleccionar un rol antes de iniciar la sesión.", "SharedCockpitClient",
-                        MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                    Application.Exit();
-                    return;
-                }
+                var latency = _wsManager?.AverageRttMs ?? 0;
+                UpdateLatency(latency);
 
-                Console.WriteLine("──────────────────────────────────────────────");
-                Console.WriteLine($"[Boot] Rol seleccionado: {GlobalFlags.Role.ToUpperInvariant()} | Sala: {GlobalFlags.RoomName}");
-                Console.WriteLine("──────────────────────────────────────────────\n");
-
-                var previous = await _snapshotStore.LoadAsync(default);
-                foreach (var kv in previous)
-                    _stateManager.Set(kv.Key, kv.Value);
-
-                bool isHost = GlobalFlags.Role.Equals("host", StringComparison.OrdinalIgnoreCase);
-                Uri? peerUri = string.IsNullOrWhiteSpace(GlobalFlags.PeerAddress)
-                    ? null
-                    : new Uri($"ws://{GlobalFlags.PeerAddress}:8081");
-
-                _wsManager = new WebSocketManager(isHost, peerUri);
-                _wsCts = new CancellationTokenSource();
-                try
-                {
-                    await _wsManager.StartAsync(_wsCts.Token).ConfigureAwait(false);
-                }
-                catch (Exception ex)
-                {
-                    Console.WriteLine("[WebSocket] ❌ Error: no se pudo conectar al host.");
-                    Console.WriteLine($"[WebSocket] Detalle: {ex.Message}");
-                    MessageBox.Show("No se pudo conectar al host.", "SharedCockpitClient",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    Application.Exit();
-                    return;
-                }
-
-                _simManager.Start();
-                if (isHost)
-                {
-                    Console.WriteLine("[RealtimeSync] 🛰 Host en ws://0.0.0.0:8081");
-                }
-                else if (peerUri != null)
-                {
-                    Console.WriteLine($"[RealtimeSync] 🛰 Cliente conectado a {peerUri}");
-                }
-                await _simManager.WaitForCockpitReadyAsync();
-                Console.WriteLine("[Boot] 🧩 Cabina lista, activando sincronización RT...");
-
-                _realtimeSync = new RealtimeSyncManager(_simManager, _wsManager);
-                _simManager.OnSnapshot += HandleSimSnapshot;
-                _wsManager.OnStateDiff += HandleStateDiff;
-
-                StartAutosaveTimer();
-
-                Console.WriteLine("[MainForm] ✅ Cliente iniciado correctamente (sincronización RT activa).");
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[MainForm] ⚠️ Error al iniciar: {ex.Message}");
-            }
-        }
-
-        private void OnFormClosing(object? sender, FormClosingEventArgs e)
-        {
-            try
-            {
-                _simManager.OnSnapshot -= HandleSimSnapshot;
-                _realtimeSync?.Dispose();
-                _simManager.Dispose();
-
+                var status = "🔴 Desconectado";
                 if (_wsManager != null)
                 {
-                    _wsManager.OnStateDiff -= HandleStateDiff;
-                    _wsManager.Dispose();
+                    if (_wsManager.IsConnected)
+                        status = "🟢 Conectado";
+                    else if (_sessionInfo.Role == SessionRole.Host)
+                        status = "🟡 Esperando conexión";
+                    else
+                        status = "🔴 Desconectado";
                 }
 
-                try { _wsCts?.Cancel(); } catch { }
-                _wsCts?.Dispose();
+                UpdateNetworkStatus(status, status);
+            };
+        }
 
-                if (_hudTimer != null)
-                {
-                    _hudTimer.Stop();
-                    _hudTimer.Dispose();
-                }
+        private async void MainForm_Load(object? sender, EventArgs e)
+        {
+            lblRoleValue.Text = _sessionInfo.Role == SessionRole.Host ? "HOST" : "CLIENT";
+            lblRoomValue.Text = _sessionInfo.RoomName;
+            UpdateNetworkStatus("🟡 Iniciando", "🟡 Iniciando");
+            UpdateLatency(0);
+            UpdateDiffCount(0);
+            UpdateLastSent(null, 0);
+            UpdateLastReceived(null, 0);
+            DisableSessionButtons();
 
-                if (_autosaveTimer != null)
-                {
-                    _autosaveTimer.Stop();
-                    _autosaveTimer.Dispose();
-                }
+            AppendLog("────────────────────────────────");
+            AppendLog("✈️ SharedCockpitClient iniciado");
+            AppendLog($"[Boot] Rol seleccionado: {lblRoleValue.Text} | Sala: {_sessionInfo.RoomName}");
+            AppendLog("────────────────────────────────");
 
-                Console.WriteLine("[MainForm] 📴 Cliente cerrado correctamente.");
+            await InitializeSimConnectAsync().ConfigureAwait(false);
+        }
+
+        private async Task InitializeSimConnectAsync()
+        {
+            try
+            {
+                _simManager = new SimConnectManager(_stateManager);
+                _simManager.OnSnapshot += HandleSimSnapshot;
+                _simManager.OnCommand += HandleSimCommand;
+                _simManager.Start();
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[MainForm] ⚠️ Error al cerrar: {ex.Message}");
+                AppendLog($"[SimConnect] ❌ Error inicializando: {ex.Message}");
+                MessageBox.Show(this,
+                    "❌ MSFS no detectado. Abra el simulador y reinicie SharedCockpitClient.",
+                    "SharedCockpitClient",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                UpdateNetworkStatus("🔴 SimConnect no disponible", "🔴 Desconectado");
+                DisableSessionButtons();
+                return;
+            }
+
+            if (_simManager == null)
+                return;
+
+            if (!_simManager.IsConnected)
+            {
+                AppendLog("[SimConnect] ⏳ Esperando conexión con MSFS...");
+                await _simManager.WaitForCockpitReadyAsync().ConfigureAwait(false);
+            }
+
+            if (!_simManager.IsConnected)
+            {
+                AppendLog("[SimConnect] ❌ MSFS no detectado. Abra el simulador y reinicie SharedCockpitClient.");
+                MessageBox.Show(this,
+                    "❌ MSFS no detectado. Abra el simulador y reinicie SharedCockpitClient.",
+                    "SharedCockpitClient",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Error);
+                UpdateNetworkStatus("🔴 SimConnect no disponible", "🔴 Desconectado");
+                DisableSessionButtons();
+                return;
+            }
+
+            AppendLog("[SimConnect] ✅ Conexión establecida con MSFS2024");
+            EnableButtonsForRole();
+
+            if (_sessionInfo.Role == SessionRole.Host)
+                await StartHostAsync().ConfigureAwait(false);
+            else
+                await StartClientAsync().ConfigureAwait(false);
+        }
+
+        private async Task StartHostAsync()
+        {
+            DisableButtonsDuringAction();
+            AppendLog("[Network] 🟡 Iniciando modo HOST...");
+
+            _networkCts?.Cancel();
+            _networkCts = new CancellationTokenSource();
+            _wsManager = new WebSocketManager(true, portOverride: DefaultPort);
+            _wsManager.OnMessage += msg => AppendLog($"[WebSocket] {msg}");
+
+            try
+            {
+                await _wsManager.StartAsync(_networkCts.Token).ConfigureAwait(false);
+                AppendLog($"[Network] 🟡 Esperando copiloto en ws://0.0.0.0:{DefaultPort}");
+                UpdateNetworkStatus("🟡 Esperando conexión", "🟡 Esperando conexión");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"[Network] ❌ Error iniciando host: {ex.Message}");
+                UpdateNetworkStatus("🔴 Error", "🔴 Desconectado");
+                StopNetwork();
+                EnableButtonsForRole();
+                return;
+            }
+
+            if (_sessionInfo.IsPublicBroadcast)
+            {
+                var hostIp = ResolveLocalAddress();
+                _broadcaster = new LanDiscoveryBroadcaster(_sessionInfo.RoomName, hostIp, DefaultPort, 9801);
+            }
+
+            await InitializeRealtimeSyncAsync().ConfigureAwait(false);
+            EnableButtonsForRole();
+        }
+
+        private async Task StartClientAsync()
+        {
+            if (string.IsNullOrWhiteSpace(_sessionInfo.HostEndpoint))
+            {
+                AppendLog("[Network] ❌ No se especificó host para el modo cliente.");
+                UpdateNetworkStatus("🔴 Sin host", "🔴 Desconectado");
+                return;
+            }
+
+            DisableButtonsDuringAction();
+            AppendLog($"[Network] 🔗 Conectando a {_sessionInfo.HostEndpoint}...");
+
+            _networkCts?.Cancel();
+            _networkCts = new CancellationTokenSource();
+            var uri = new Uri($"ws://{_sessionInfo.HostEndpoint}");
+            _wsManager = new WebSocketManager(false, uri);
+            _wsManager.OnMessage += msg => AppendLog($"[WebSocket] {msg}");
+
+            try
+            {
+                await _wsManager.StartAsync(_networkCts.Token).ConfigureAwait(false);
+                UpdateNetworkStatus("🟢 Conectado", "🟢 Conectado");
+                AppendLog("[Network] 🟢 Pareja conectada");
+            }
+            catch (Exception ex)
+            {
+                AppendLog($"[Network] ❌ No se pudo conectar: {ex.Message}");
+                UpdateNetworkStatus("🔴 Desconectado", "🔴 Desconectado");
+                StopNetwork();
+                EnableButtonsForRole();
+                return;
+            }
+
+            await InitializeRealtimeSyncAsync().ConfigureAwait(false);
+            EnableButtonsForRole();
+        }
+
+        private async Task InitializeRealtimeSyncAsync()
+        {
+            if (_simManager == null || _wsManager == null)
+                return;
+
+            _realtimeSync?.Dispose();
+            _realtimeSync = new RealtimeSyncManager(_simManager, _wsManager);
+            _wsManager.OnStateDiff -= HandleRemoteDiff;
+            _wsManager.OnStateDiff += HandleRemoteDiff;
+
+            AppendLog("[RealtimeSync] 🟢 Sincronización activa");
+            AppendLog("[RealtimeSync] Bidireccional habilitada");
+            _latencyTimer.Start();
+
+            var previous = await _snapshotStore.LoadAsync(CancellationToken.None).ConfigureAwait(false);
+            foreach (var entry in previous)
+            {
+                _stateManager.Set(entry.Key, entry.Value);
             }
         }
 
-        protected override bool ProcessCmdKey(ref Message msg, Keys keyData)
+        private void HandleSimSnapshot(SimStateSnapshot snapshot, bool isDiff)
         {
-            if (keyData == (Keys.Control | Keys.F12))
-            {
-                ToggleHudDiagnostics();
-                return true;
-            }
+            if (snapshot == null || _realtimeSync == null)
+                return;
 
-            if (keyData == Keys.F12)
-            {
-                ToggleHud();
-                return true;
-            }
+            var payloadBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(snapshot.ToFlatDictionary());
+            UpdateLastSent(DateTime.UtcNow, payloadBytes.Length);
+            _lastDiffCount = snapshot.Values.Count;
+            UpdateDiffCount(_lastDiffCount);
 
-            return base.ProcessCmdKey(ref msg, keyData);
+            _realtimeSync.UpdateAndSync(snapshot, lblRoleValue.Text);
         }
 
-        private void HandleSimSnapshot(SimStateSnapshot snapshot, bool _)
+        private void HandleSimCommand(SimCommandMessage message)
         {
-            lock (_snapshotLock)
-            {
-                _latestSnapshot = snapshot.Clone();
-            }
-
-            _realtimeSync?.UpdateAndSync(snapshot, GlobalFlags.Role);
+            AppendLog($"[SimConnect] Cmd -> {message.Command} = {message.Value}");
         }
 
-        private void HandleStateDiff(string? role, string? originId, long sequence, Dictionary<string, object?> diff)
+        private void HandleRemoteDiff(string? role, string? originId, long sequence, Dictionary<string, object?> diff)
         {
+            if (_simManager == null)
+                return;
+
+            _lastDiffCount = diff?.Count ?? 0;
+            UpdateDiffCount(_lastDiffCount);
+
             if (diff == null || diff.Count == 0)
                 return;
 
-            var filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kv in diff)
+            var payloadBytes = System.Text.Json.JsonSerializer.SerializeToUtf8Bytes(diff);
+            UpdateLastReceived(DateTime.UtcNow, payloadBytes.Length);
+
+            _ = Task.Run(async () =>
             {
-                if (!SimStateSnapshot.LooksLikeSimVar(kv.Key))
-                    continue;
-                if (kv.Value is null)
-                    continue;
-                filtered[kv.Key] = kv.Value;
-            }
-
-            if (filtered.Count == 0)
-                return;
-
-            _realtimeSync?.ApplyRemoteDiff(role, originId, sequence, filtered);
-
-            lock (_snapshotLock)
-            {
-                if (_latestSnapshot == null)
+                foreach (var kvp in diff)
                 {
-                    _latestSnapshot = new SimStateSnapshot();
+                    try
+                    {
+                        await _simManager.ApplyRemoteChangeAsync(kvp.Key, kvp.Value, CancellationToken.None)
+                            .ConfigureAwait(false);
+                    }
+                    catch (Exception ex)
+                    {
+                        AppendLog($"[RealtimeSync] ⚠️ Error aplicando {kvp.Key}: {ex.Message}");
+                    }
                 }
-
-                _latestSnapshot.ApplyDiff(filtered);
-            }
+            });
         }
 
-        private void ToggleHud()
+        private void btnStartHost_Click(object sender, EventArgs e)
         {
-            if (!_hudVisible)
+            if (_sessionInfo.Role != SessionRole.Host)
             {
-                EnsureHud();
-                _hudPanel!.Visible = true;
-                _hudTimer?.Start();
-                _hudVisible = true;
+                MessageBox.Show(this, "La sesión fue configurada como cliente.", "SharedCockpitClient",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
             }
-            else
-            {
-                _hudPanel?.Hide();
-                _hudTimer?.Stop();
-                _hudVisible = false;
-            }
+
+            _ = StartHostAsync();
         }
 
-        private void EnsureHud()
+        private void btnConnectClient_Click(object sender, EventArgs e)
         {
-            if (_hudPanel != null)
+            if (_sessionInfo.Role != SessionRole.Client)
+            {
+                MessageBox.Show(this, "La sesión fue configurada como host.", "SharedCockpitClient",
+                    MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _ = StartClientAsync();
+        }
+
+        private void btnStop_Click(object sender, EventArgs e)
+        {
+            AppendLog("[Network] 🛑 Sesión detenida por el usuario");
+            StopNetwork();
+            UpdateNetworkStatus("🔴 Desconectado", "🔴 Desconectado");
+        }
+
+        private void StopNetwork()
+        {
+            _latencyTimer.Stop();
+            _networkCts?.Cancel();
+            _networkCts?.Dispose();
+            _networkCts = null;
+
+            if (_wsManager != null)
+            {
+                _wsManager.OnStateDiff -= HandleRemoteDiff;
+                _wsManager.Dispose();
+                _wsManager = null;
+            }
+
+            _realtimeSync?.Dispose();
+            _realtimeSync = null;
+
+            _broadcaster?.Dispose();
+            _broadcaster = null;
+
+            UpdateLatency(0);
+        }
+
+        private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
+        {
+            StopNetwork();
+
+            if (_simManager != null)
+            {
+                _simManager.OnSnapshot -= HandleSimSnapshot;
+                _simManager.OnCommand -= HandleSimCommand;
+                _simManager.Dispose();
+                _simManager = null;
+            }
+
+            _latencyTimer.Stop();
+            _latencyTimer.Dispose();
+        }
+
+        private void AppendLog(string line)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string>(AppendLog), line);
+                return;
+            }
+
+            lock (_logLock)
+            {
+                if (txtLog.TextLength > 0)
+                    txtLog.AppendText(Environment.NewLine);
+                txtLog.AppendText(line);
+            }
+            Console.WriteLine(line);
+        }
+
+        private void UpdateNetworkStatus(string text, string consoleText)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<string, string>(UpdateNetworkStatus), text, consoleText);
+                return;
+            }
+
+            if (string.Equals(_currentNetworkStatus, text, StringComparison.Ordinal))
                 return;
 
-            _hudPanel = new Panel
-            {
-                AutoSize = true,
-                AutoSizeMode = AutoSizeMode.GrowAndShrink,
-                BackColor = Color.FromArgb(160, 16, 16, 16),
-                ForeColor = Color.White,
-                Anchor = AnchorStyles.Top | AnchorStyles.Right,
-            };
-
-            _hudLabel = new Label
-            {
-                AutoSize = true,
-                MaximumSize = new Size(260, 0),
-                TextAlign = ContentAlignment.MiddleLeft,
-                Font = new Font(FontFamily.GenericMonospace, 10f, FontStyle.Bold),
-                ForeColor = Color.FromArgb(240, 240, 240)
-            };
-
-            _hudPanel.Controls.Add(_hudLabel);
-            Controls.Add(_hudPanel);
-            _hudPanel.BringToFront();
-
-            _hudTimer = new System.Windows.Forms.Timer { Interval = 500 }; // ✅ corregido
-            _hudTimer.Tick += UpdateHud;
-            Resize += (_, _) => PositionHud();
-            PositionHud();
+            _currentNetworkStatus = text;
+            lblNetworkValue.Text = text;
+            Console.WriteLine($"[Network] {consoleText}");
         }
 
-        private void UpdateHud(object? sender, EventArgs e)
+        private void UpdateLatency(double latencyMs)
         {
-            if (!_hudVisible || _hudLabel == null)
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<double>(UpdateLatency), latencyMs);
                 return;
-
-            SimStateSnapshot? snapshotCopy = null;
-            lock (_snapshotLock)
-            {
-                if (_latestSnapshot != null)
-                    snapshotCopy = _latestSnapshot.Clone();
             }
 
-            string ias = "--";
-            string alt = "--";
-            if (snapshotCopy?.TryGetDouble("AIRSPEED INDICATED", out var iasVal) == true)
-                ias = iasVal.ToString("0");
-            if (snapshotCopy?.TryGetDouble("PLANE ALTITUDE", out var altVal) == true)
-                alt = altVal.ToString("0");
-
-            var wsConnected = _wsManager?.IsConnected == true;
-            var fps = _simManager?.LastFps ?? -1;
-            var varsCount = snapshotCopy?.Values?.Count ?? 0;
-            var driftSeconds = snapshotCopy != null
-                ? Math.Max(0, (DateTime.UtcNow - snapshotCopy.TimestampUtc).TotalSeconds)
-                : 0;
-
-            var status = $"[HUD] Role: {GlobalFlags.Role.ToUpperInvariant()} | WS: {(wsConnected ? "Connected" : "Offline")} | " +
-                         $"FPS: {(fps < 0 ? "--" : fps.ToString("0"))} | Vars: {varsCount} | Drift: {driftSeconds:0.00}s";
-
-            if (!string.Equals(_lastHudStatus, status, StringComparison.Ordinal))
-            {
-                Console.WriteLine(status);
-                _lastHudStatus = status;
-            }
-
-            _hudLabel.Text = status +
-                $"\nIAS {ias} kt | ALT {alt} ft | WS {(wsConnected ? "🟢" : "🔴")}";
-
-            PositionHud();
+            lblLatencyValue.Text = latencyMs <= 0 ? "-" : $"{latencyMs:F0} ms";
         }
 
-        private void PositionHud()
+        private void UpdateDiffCount(int count)
         {
-            if (_hudPanel == null)
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<int>(UpdateDiffCount), count);
                 return;
-
-            const int margin = 20;
-            var x = Math.Max(margin, ClientSize.Width - _hudPanel.Width - margin);
-            var y = margin;
-            _hudPanel.Location = new Point(x, y);
-        }
-
-        // ====== Handlers requeridos por el Designer ======
-        private void txtIp_TextChanged(object sender, EventArgs e) { }
-        private void btnHost_Click(object sender, EventArgs e) { }
-        private void btnClient_Click(object sender, EventArgs e) { }
-        private void btnStop_Click(object sender, EventArgs e) { }
-
-        private void ToggleHudDiagnostics()
-        {
-            if (!_hudVisible)
-            {
-                ToggleHud();
             }
 
-            _hudDiagnosticsExpanded = !_hudDiagnosticsExpanded;
-            UpdateHud(this, EventArgs.Empty);
+            lblDiffValue.Text = count > 0 ? count.ToString() : "-";
         }
 
-        private void StartAutosaveTimer()
+        private void UpdateLastSent(DateTime? timestampUtc, int bytes)
         {
-            _autosaveTimer = new System.Windows.Forms.Timer { Interval = 5000 };
-            _autosaveTimer.Tick += AutosaveTimerTick;
-            _autosaveTimer.Start();
-        }
-
-        private async void AutosaveTimerTick(object? sender, EventArgs e)
-        {
-            SimStateSnapshot? snapshotCopy = null;
-            lock (_snapshotLock)
+            if (InvokeRequired)
             {
-                if (_latestSnapshot != null)
-                    snapshotCopy = _latestSnapshot.Clone();
-            }
-
-            if (snapshotCopy == null)
+                BeginInvoke(new Action<DateTime?, int>(UpdateLastSent), timestampUtc, bytes);
                 return;
+            }
 
-            try
-            {
-                await _snapshotStore.SaveIfChangedAsync(snapshotCopy, CancellationToken.None).ConfigureAwait(false);
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[Autosave] ⚠️ Error guardando snapshot: {ex.Message}");
-            }
+            _lastSentUtc = timestampUtc;
+            _lastSentBytes = bytes;
+            lblLastSentValue.Text = timestampUtc == null
+                ? "-"
+                : $"{timestampUtc:HH:mm:ss} UTC · {bytes} bytes";
         }
 
+        private void UpdateLastReceived(DateTime? timestampUtc, int bytes)
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action<DateTime?, int>(UpdateLastReceived), timestampUtc, bytes);
+                return;
+            }
+
+            _lastReceivedUtc = timestampUtc;
+            _lastReceivedBytes = bytes;
+            lblLastReceivedValue.Text = timestampUtc == null
+                ? "-"
+                : $"{timestampUtc:HH:mm:ss} UTC · {bytes} bytes";
+        }
+
+        private void DisableButtonsDuringAction()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(DisableButtonsDuringAction));
+                return;
+            }
+
+            btnStartHost.Enabled = false;
+            btnConnectClient.Enabled = false;
+            btnStop.Enabled = false;
+        }
+
+        private void EnableButtonsForRole()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(EnableButtonsForRole));
+                return;
+            }
+
+            btnStartHost.Enabled = _sessionInfo.Role == SessionRole.Host;
+            btnConnectClient.Enabled = _sessionInfo.Role == SessionRole.Client;
+            btnStop.Enabled = true;
+        }
+
+        private void DisableSessionButtons()
+        {
+            if (InvokeRequired)
+            {
+                BeginInvoke(new Action(DisableSessionButtons));
+                return;
+            }
+
+            btnStartHost.Enabled = false;
+            btnConnectClient.Enabled = false;
+            btnStop.Enabled = false;
+        }
+
+        private static string ResolveLocalAddress()
+        {
+            foreach (var iface in NetworkInterface.GetAllNetworkInterfaces())
+            {
+                if (iface.OperationalStatus != OperationalStatus.Up)
+                    continue;
+
+                var props = iface.GetIPProperties();
+                foreach (var addr in props.UnicastAddresses)
+                {
+                    if (addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                    {
+                        return addr.Address.ToString();
+                    }
+                }
+            }
+
+            return "127.0.0.1";
+        }
     }
 }
