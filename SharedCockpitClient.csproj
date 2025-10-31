@@ -29,7 +29,6 @@
   <!-- 🧱 Incluir código -->
   <ItemGroup>
     <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
-    <Compile Include="FlightData\SimConnectMissingEnumsShim.cs" />
   </ItemGroup>
 
   <!-- 🔗 Referencias a SimConnect -->

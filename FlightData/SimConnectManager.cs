@@ -4,10 +4,6 @@ using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.FlightSimulator.SimConnect;
-#if SIMCONNECT_STUB
-using SIMCONNECT_DATA_DEFINITION_ID = System.UInt32;
-using SIMCONNECT_CLIENT_EVENT_ID = System.UInt32;
-#endif
 using SharedCockpitClient.Utils;
 
 namespace SharedCockpitClient
@@ -24,6 +20,7 @@ namespace SharedCockpitClient
         private readonly SimCommandApplier _commandApplier;
         private bool _started;
         private SimConnect? _simConnect;
+        private readonly Dictionary<string, Type?> _simConnectEnumTypes = new(StringComparer.Ordinal);
         private IntPtr _windowHandle = IntPtr.Zero;
         private CancellationTokenSource? _offlineCts;
         private bool _initialSnapshotQueued;
@@ -60,10 +57,6 @@ namespace SharedCockpitClient
 
             _localInstanceKey = _localInstanceId.ToString("N");
 
-#if SIMCONNECT_STUB
-            Logger.Warn("[SimConnect] ⚠️ SimConnect.dll no encontrado. Usando stub administrado para compilación. La sincronización en vivo requiere la DLL real.");
-#endif
-
             Logger.Info("[SimConnect] 🚀 Inicializando conexión real con MSFS2024...");
             InitializeSimConnect();
             _collector = new SimDataCollector(ct => ReadSnapshotFlatAsync(ct));
@@ -84,6 +77,7 @@ namespace SharedCockpitClient
             try
             {
                 _simConnect = new SimConnect("SharedCockpitClient", _windowHandle, 0, null, 0);
+                _simConnectEnumTypes.Clear();
                 OnSimConnectOpened();
 
                 _simConnect.OnRecvOpen += HandleSimConnectOpen;
@@ -125,6 +119,10 @@ namespace SharedCockpitClient
             if (_simConnect == null)
                 return 0;
 
+            var simConnect = GetSimConnectDynamic();
+            if (simConnect is null)
+                return 0;
+
             _requestToDescriptor.Clear();
             _definitionByKey.Clear();
 
@@ -147,7 +145,7 @@ namespace SharedCockpitClient
                         _ => SIMCONNECT_DATATYPE.FLOAT64
                     };
 
-                    _simConnect.AddToDataDefinition(defId, descriptor.Name, descriptor.Units ?? string.Empty, simType, 0.0f, SimConnect.SIMCONNECT_UNUSED);
+                    simConnect.AddToDataDefinition(ToSimConnect(defId), descriptor.Name, descriptor.Units ?? string.Empty, simType, 0.0f, SimConnect.SIMCONNECT_UNUSED);
                     RegisterStructForDescriptor(defId, descriptor.DataType);
 
                     var key = descriptor.DefinitionKey;
@@ -157,9 +155,9 @@ namespace SharedCockpitClient
 
                     _requestToDescriptor[(uint)reqId] = descriptor;
 
-                    _simConnect.RequestDataOnSimObject(reqId, defId, SimConnect.SIMCONNECT_OBJECT_ID_USER,
+                    simConnect.RequestDataOnSimObject(ToSimConnect(reqId), ToSimConnect(defId), SimConnect.SIMCONNECT_OBJECT_ID_USER,
                         SIMCONNECT_PERIOD.SIM_FRAME, SIMCONNECT_DATA_REQUEST_FLAG.CHANGED, 0, 0, 0);
-                    _simConnect.RequestDataOnSimObjectType(reqId, defId, 0, SIMCONNECT_SIMOBJECT_TYPE.USER);
+                    simConnect.RequestDataOnSimObjectType(ToSimConnect(reqId), ToSimConnect(defId), 0, SIMCONNECT_SIMOBJECT_TYPE.USER);
                     registered++;
                 }
                 catch (Exception ex)
@@ -176,10 +174,15 @@ namespace SharedCockpitClient
             if (_simConnect == null)
                 return 0;
 
+            var simConnect = GetSimConnectDynamic();
+            if (simConnect is null)
+                return 0;
+
             _clientEventById.Clear();
             _eventClientByName.Clear();
 
             var groupId = (SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS;
+            var scGroupId = ToSimConnect(groupId);
             var eventId = EVENT_ID_BASE;
             var registered = 0;
 
@@ -188,8 +191,9 @@ namespace SharedCockpitClient
                 try
                 {
                     var clientId = (SIMCONNECT_CLIENT_EVENT_ID)eventId++;
-                    _simConnect.MapClientEventToSimEvent(clientId, descriptor.EventName);
-                    _simConnect.AddClientEventToNotificationGroup(groupId, clientId, false);
+                    var scClientId = ToSimConnect(clientId);
+                    simConnect.MapClientEventToSimEvent(scClientId, descriptor.EventName);
+                    simConnect.AddClientEventToNotificationGroup(scGroupId, scClientId, false);
 
                     _clientEventById[(uint)clientId] = descriptor;
 
@@ -207,30 +211,31 @@ namespace SharedCockpitClient
                 }
             }
 
-            _simConnect.SetNotificationGroupPriority(groupId, (uint)SIMCONNECT_GROUP_PRIORITY.HIGHEST);
+            simConnect.SetNotificationGroupPriority(scGroupId, (uint)SIMCONNECT_GROUP_PRIORITY.HIGHEST);
             return registered;
         }
 
-        private void HandleSimConnectOpen(object? sender, EventArgs e)
+        private void HandleSimConnectOpen(SimConnect _, SIMCONNECT_RECV_OPEN __)
         {
             OnSimConnectOpened();
         }
 
-        private void HandleSimConnectQuit(object? sender, EventArgs e)
+        private void HandleSimConnectQuit(SimConnect _, SIMCONNECT_RECV __)
         {
             Logger.Error("[SimConnect] ❌ Sesión cerrada.");
             _simConnect?.Dispose();
             _simConnect = null;
+            _simConnectEnumTypes.Clear();
             IsConnected = false;
             _initialSnapshotQueued = false;
         }
 
-        private void HandleSimConnectException(object? sender, SIMCONNECT_RECV_EXCEPTION data)
+        private void HandleSimConnectException(SimConnect _, SIMCONNECT_RECV_EXCEPTION data)
         {
             Logger.Warn($"[SimConnect] ⚠️ Excepción: {data.dwException}");
         }
 
-        private void HandleSimConnectSimobjectData(object? sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void HandleSimConnectSimobjectData(SimConnect _, SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
             try
             {
@@ -242,7 +247,7 @@ namespace SharedCockpitClient
             }
         }
 
-        private void HandleSimConnectEvent(object? sender, SIMCONNECT_RECV_EVENT data)
+        private void HandleSimConnectEvent(SimConnect _, SIMCONNECT_RECV_EVENT data)
         {
             if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
                 return;
@@ -313,20 +318,24 @@ namespace SharedCockpitClient
             if (_simConnect == null)
                 return;
 
+            var simConnect = GetSimConnectDynamic();
+            if (simConnect is null)
+                return;
+
             try
             {
                 switch (type)
                 {
                     case SimDataType.Float32:
                     case SimDataType.Float64:
-                        _simConnect.RegisterDataDefineStruct<double>(definitionId);
+                        simConnect.RegisterDataDefineStruct<double>(ToSimConnect(definitionId));
                         break;
                     case SimDataType.Int32:
                     case SimDataType.Bool:
-                        _simConnect.RegisterDataDefineStruct<int>(definitionId);
+                        simConnect.RegisterDataDefineStruct<int>(ToSimConnect(definitionId));
                         break;
                     case SimDataType.String256:
-                        _simConnect.RegisterDataDefineStruct<string>(definitionId);
+                        simConnect.RegisterDataDefineStruct<string>(ToSimConnect(definitionId));
                         break;
                 }
             }
@@ -341,17 +350,56 @@ namespace SharedCockpitClient
 
         private static object?[]? ExtractSimDataPayload(SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
-#if SIMCONNECT_STUB
-            return data.dwData;
-#else
             return data.dwData switch
             {
                 object[] array => array,
                 object value => new object?[] { value },
                 _ => null
             };
-#endif
         }
+
+        private object ToSimConnect(SIMCONNECT_DATA_DEFINITION_ID value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_DATA_DEFINITION_ID));
+
+        private object ToSimConnect(SIMCONNECT_DATA_REQUEST_ID value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_DATA_REQUEST_ID));
+
+        private object ToSimConnect(SIMCONNECT_CLIENT_EVENT_ID value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_CLIENT_EVENT_ID));
+
+        private object ToSimConnect(SIMCONNECT_NOTIFICATION_GROUP_ID value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_NOTIFICATION_GROUP_ID));
+
+        private object ToSimConnect(SIMCONNECT_EVENT_FLAG value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_EVENT_FLAG));
+
+        private object ToSimConnect(SIMCONNECT_DATA_SET_FLAG value)
+            => ConvertToSimConnectEnum(value, nameof(SIMCONNECT_DATA_SET_FLAG));
+
+        private object ConvertToSimConnectEnum<TEnum>(TEnum value, string remoteName)
+            where TEnum : struct, Enum
+        {
+            var numericValue = Convert.ToUInt32(value);
+            var enumType = ResolveSimConnectEnumType(remoteName);
+            return enumType != null ? Enum.ToObject(enumType, numericValue) : numericValue;
+        }
+
+        private Type? ResolveSimConnectEnumType(string enumName)
+        {
+            if (_simConnect == null)
+                return null;
+
+            if (_simConnectEnumTypes.TryGetValue(enumName, out var cached))
+                return cached;
+
+            var assembly = _simConnect.GetType().Assembly;
+            var resolved = assembly.GetType($"Microsoft.FlightSimulator.SimConnect.{enumName}");
+            _simConnectEnumTypes[enumName] = resolved;
+            return resolved;
+        }
+
+        private dynamic? GetSimConnectDynamic()
+            => _simConnect is null ? null : (dynamic)_simConnect;
 
         private bool TryReadIncomingValue(SimVarDescriptor descriptor, IReadOnlyList<object?>? rawData, out object? value)
         {
@@ -421,8 +469,7 @@ namespace SharedCockpitClient
             {
                 switch (descriptor.DataType)
                 {
-                    case SimDataType.Float32:
-                    case SimDataType.Float64:
+                    case SimDataType.Float32 or SimDataType.Float64:
                         var dbl = Convert.ToDouble(value ?? 0);
                         normalized = dbl;
                         payload = dbl;
@@ -556,6 +603,10 @@ namespace SharedCockpitClient
             if (_simConnect == null)
                 return Task.FromResult(false);
 
+            var simConnect = GetSimConnectDynamic();
+            if (simConnect is null)
+                return Task.FromResult(false);
+
             if (!TryGetDefinitionId(descriptor, out var definitionId))
                 return Task.FromResult(false);
 
@@ -564,7 +615,7 @@ namespace SharedCockpitClient
 
             try
             {
-                _simConnect.SetDataOnSimObject(definitionId, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_DATA_SET_FLAG.DEFAULT, payload!);
+                simConnect.SetDataOnSimObject(ToSimConnect(definitionId), SimConnect.SIMCONNECT_OBJECT_ID_USER, ToSimConnect(SIMCONNECT_DATA_SET_FLAG.DEFAULT), payload!);
                 var key = BuildSimVarKey(descriptor);
                 MirrorState(key, normalized);
                 return Task.FromResult(true);
@@ -579,6 +630,10 @@ namespace SharedCockpitClient
         private Task<bool> TriggerSimEventAsync(SimEventDescriptor descriptor, object? value, CancellationToken ct)
         {
             if (_simConnect == null)
+                return Task.FromResult(false);
+
+            var simConnect = GetSimConnectDynamic();
+            if (simConnect is null)
                 return Task.FromResult(false);
 
             if (!TryGetClientEventId(descriptor, out var clientEvent))
@@ -599,12 +654,12 @@ namespace SharedCockpitClient
                 lock (_pendingEventEcho)
                     _pendingEventEcho[(uint)clientEvent] = DateTime.UtcNow.AddMilliseconds(500);
 
-                _simConnect.TransmitClientEvent(
+                simConnect.TransmitClientEvent(
                     SimConnect.SIMCONNECT_OBJECT_ID_USER,
-                    clientEvent,
+                    ToSimConnect(clientEvent),
                     eventData,
-                    (SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS,
-                    SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
+                    ToSimConnect((SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS),
+                    ToSimConnect(SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY));
 
                 return Task.FromResult(true);
             }
