@@ -1,52 +1,45 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
 
-  <!-- Comando recomendado para publicar manualmente:
-  dotnet publish "SharedCockpitClient.csproj" -c Release -r win-x64 /p:SelfContained=true /p:PublishSingleFile=true /p:PublishTrimmed=false -o "E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish"
-  -->
-
   <PropertyGroup>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <OutputType>Exe</OutputType>
+    <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <LangVersion>preview</LangVersion>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
     <NoWarn>IDE0051;CA1822;CS1591;CS8618;CS8622;CS8625;CS8602;CS0436</NoWarn>
-  </PropertyGroup>
-
-  <PropertyGroup>
+    <Platforms>AnyCPU;x64</Platforms>
+    <StartupObject>SharedCockpitClient.Program</StartupObject>
     <RuntimeIdentifier>win-x64</RuntimeIdentifier>
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <PublishTrimmed>false</PublishTrimmed>
-    <UseWindowsForms>true</UseWindowsForms>
-    <OutputType>Exe</OutputType>
-    <TargetFramework>net8.0-windows</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
-    <Platforms>AnyCPU;x64</Platforms>
-    <StartupObject>SharedCockpitClient.Program</StartupObject>
-
-    <!-- 🔒 Perfil laboratorio: silencia archivos no usados en Fase 1 -->
   </PropertyGroup>
 
-  <ItemGroup>
-    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
-  </ItemGroup>
-
+  <!-- 📦 Paquetes -->
   <ItemGroup>
     <PackageReference Include="System.Text.Json" Version="8.0.5" />
   </ItemGroup>
 
-  <PropertyGroup Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
-    <DefineConstants>$(DefineConstants);SIMCONNECT_STUB</DefineConstants>
-  </PropertyGroup>
-
+  <!-- 🧱 Incluir código -->
   <ItemGroup>
-    <Reference Include="Microsoft.FlightSimulator.SimConnect" Condition="Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
+    <Compile Include="**\*.cs" Exclude="bin\**;obj\**" />
+    <Compile Include="FlightData\SimConnectMissingEnumsShim.cs" />
+  </ItemGroup>
+
+  <!-- 🔗 Referencias a SimConnect -->
+  <ItemGroup>
+    <Reference Include="Microsoft.FlightSimulator.SimConnect"
+               Condition="Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
       <HintPath>libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll</HintPath>
       <Private>true</Private>
     </Reference>
+
     <Reference Include="Microsoft.FlightSimulator.SimConnect"
                Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll') and Exists('C:\MSFS 2024 SDK\SimConnect SDK\lib\managed\Microsoft.FlightSimulator.SimConnect.dll')">
       <HintPath>C:\MSFS 2024 SDK\SimConnect SDK\lib\managed\Microsoft.FlightSimulator.SimConnect.dll</HintPath>
@@ -54,60 +47,48 @@
     </Reference>
   </ItemGroup>
 
-  <ItemGroup Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
-    <Compile Include="Stubs\SimConnectStub.cs" />
-  </ItemGroup>
+  <!-- 🧩 Modo stub si no hay DLL -->
+  <PropertyGroup Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
+    <DefineConstants>$(DefineConstants);SIMCONNECT_STUB</DefineConstants>
+  </PropertyGroup>
 
-  <ItemGroup Condition="Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
-    <Compile Remove="Stubs\SimConnectStub.cs" />
-  </ItemGroup>
-
+  <!-- 📁 Copia DLLs -->
   <ItemGroup>
-    <None Include="libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
-    <None Include="libs\native\win-x64\SimConnect.dll" CopyToOutputDirectory="Always" CopyToPublishDirectory="Always" />
+    <None Include="libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll"
+          Condition="Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </None>
+
+    <None Include="libs\native\win-x64\SimConnect.dll"
+          Condition="Exists('libs\native\win-x64\SimConnect.dll')">
+      <CopyToOutputDirectory>Always</CopyToOutputDirectory>
+      <CopyToPublishDirectory>Always</CopyToPublishDirectory>
+    </None>
   </ItemGroup>
 
+  <!-- 📜 Scripts -->
   <ItemGroup>
     <Content Include="scripts\**\*.ps1">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>
 
+  <!-- 🔁 Copiar bin a publish -->
   <Target Name="CopyBuildOutputToPublish" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
     <PropertyGroup>
       <PublishOutputDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishOutputDir>
     </PropertyGroup>
+
     <ItemGroup>
       <BuildArtifacts Include="$(TargetDir)**\*.*" Exclude="$(PublishOutputDir)**\*.*" />
     </ItemGroup>
+
     <MakeDir Directories="$(PublishOutputDir)" />
+
     <Copy SourceFiles="@(BuildArtifacts)"
           DestinationFiles="@(BuildArtifacts->'$(PublishOutputDir)%(RecursiveDir)%(Filename)%(Extension)')"
           SkipUnchangedFiles="true" />
   </Target>
 
-  <Target Name="CopyMSFSSDKResources" BeforeTargets="BeforeBuild">
-    <ItemGroup>
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.h" />
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.lib" />
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.dll" />
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.xml" />
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.json" />
-      <SDKFiles Include="C:\MSFS 2024 SDK\**\*.schema.json" />
-    </ItemGroup>
-
-    <Message Text="📦 Copiando recursos del SDK de MSFS 2024..." Importance="High" />
-    <Copy SourceFiles="@(SDKFiles)"
-          DestinationFolder="SDKResources\%(RecursiveDir)"
-          SkipUnchangedFiles="true"
-          Condition="Exists('C:\MSFS 2024 SDK')" />
-    <Message Text="✅ Recursos del SDK copiados a SDKResources." Importance="High" />
-  </Target>
-
-  <ItemGroup>
-    <EmbeddedResource Include="SDKResources\**\*" />
-  </ItemGroup>
-
-  <!-- Abrir en VS, compilar Release y publicar a:
-       E:\Descargas\proyecto cabina compartida\SharedCockpitClient\bin\Release\net8.0-windows\win-x64\publish -->
 </Project>
