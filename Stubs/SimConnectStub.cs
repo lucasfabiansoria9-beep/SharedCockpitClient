@@ -25,18 +25,24 @@ namespace Microsoft.FlightSimulator.SimConnect
             Name = name ?? throw new ArgumentNullException(nameof(name));
 
             // Simulate an asynchronous OPEN notification to preserve initialization flow.
-            Task.Run(() => OnRecvOpen?.Invoke(this, EventArgs.Empty));
+            Task.Run(() => OnRecvOpen?.Invoke(this, new SIMCONNECT_RECV_OPEN()));
         }
 
         public string Name { get; }
 
         public static bool IsStub { get; } = true;
 
-        public event EventHandler? OnRecvOpen;
-        public event EventHandler? OnRecvQuit;
-        public event EventHandler<SIMCONNECT_RECV_EXCEPTION>? OnRecvException;
-        public event EventHandler<SIMCONNECT_RECV_SIMOBJECT_DATA>? OnRecvSimobjectData;
-        public event EventHandler<SIMCONNECT_RECV_EVENT>? OnRecvEvent;
+        public delegate void RecvOpenEventHandler(SimConnect sender, SIMCONNECT_RECV_OPEN data);
+        public delegate void RecvQuitEventHandler(SimConnect sender, SIMCONNECT_RECV data);
+        public delegate void RecvExceptionEventHandler(SimConnect sender, SIMCONNECT_RECV_EXCEPTION data);
+        public delegate void RecvSimobjectDataEventHandler(SimConnect sender, SIMCONNECT_RECV_SIMOBJECT_DATA data);
+        public delegate void RecvEventEventHandler(SimConnect sender, SIMCONNECT_RECV_EVENT data);
+
+        public event RecvOpenEventHandler? OnRecvOpen;
+        public event RecvQuitEventHandler? OnRecvQuit;
+        public event RecvExceptionEventHandler? OnRecvException;
+        public event RecvSimobjectDataEventHandler? OnRecvSimobjectData;
+        public event RecvEventEventHandler? OnRecvEvent;
 
         public void AddToDataDefinition(
             SIMCONNECT_DATA_DEFINITION_ID defineId,
@@ -119,7 +125,7 @@ namespace Microsoft.FlightSimulator.SimConnect
                 return;
 
             _disposed = true;
-            OnRecvQuit?.Invoke(this, EventArgs.Empty);
+            OnRecvQuit?.Invoke(this, new SIMCONNECT_RECV());
         }
 
         /// <summary>
@@ -237,6 +243,24 @@ namespace Microsoft.FlightSimulator.SimConnect
     {
         public SIMCONNECT_CLIENT_EVENT_ID uEventID;
         public uint dwData;
+    }
+
+    public struct SIMCONNECT_RECV_OPEN
+    {
+        public uint dwApplicationVersionMajor;
+        public uint dwApplicationVersionMinor;
+        public uint dwApplicationBuildMajor;
+        public uint dwApplicationBuildMinor;
+        public uint dwSimConnectVersionMajor;
+        public uint dwSimConnectVersionMinor;
+        public uint dwSimConnectBuildMajor;
+        public uint dwSimConnectBuildMinor;
+    }
+
+    public struct SIMCONNECT_RECV
+    {
+        public uint dwSize;
+        public uint dwVersion;
     }
 
     public struct SIMCONNECT_RECV_SIMOBJECT_DATA
