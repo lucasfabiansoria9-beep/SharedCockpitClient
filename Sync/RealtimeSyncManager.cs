@@ -3,12 +3,13 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using System.Threading;
 using SharedCockpitClient.FlightData;
 using SharedCockpitClient.Network;
 
 namespace SharedCockpitClient.Sync
 {
-    public class RealtimeSyncManager
+    public class RealtimeSyncManager : IDisposable
     {
         private readonly SimConnectManager simManager;
         private readonly WebSocketManager websocket;
@@ -18,6 +19,10 @@ namespace SharedCockpitClient.Sync
         private double currentDiffRate;
         private DateTime _firstSnapshotUtc = DateTime.MinValue;
         private const int WARMUP_MS = 1000;
+        private readonly Dictionary<Guid, long> _lastSequenceByOrigin = new();
+        private readonly Guid _localInstanceGuid;
+        private readonly string _localInstanceId;
+        private long _localSequence;
 
         public bool IsActive { get; private set; }
 
@@ -25,6 +30,12 @@ namespace SharedCockpitClient.Sync
         {
             this.simManager = simManager ?? throw new ArgumentNullException(nameof(simManager));
             this.websocket = websocket ?? throw new ArgumentNullException(nameof(websocket));
+
+            _localInstanceGuid = simManager.LocalInstanceId;
+            _localInstanceId = _localInstanceGuid.ToString("N");
+
+            this.simManager.OnCommand += HandleLocalCommand;
+            this.websocket.OnCommand += HandleRemoteCommand;
         }
 
         public double CurrentDiffRate
@@ -45,6 +56,8 @@ namespace SharedCockpitClient.Sync
 
             string? payload = null;
             string? logLine = null;
+            Dictionary<string, object?>? diffCopy = null;
+            long sequence = 0;
 
             lock (syncLock)
             {
@@ -80,12 +93,16 @@ namespace SharedCockpitClient.Sync
                     return;
                 }
 
+                diffCopy = new Dictionary<string, object?>(diff, StringComparer.OrdinalIgnoreCase);
+                sequence = Interlocked.Increment(ref _localSequence);
                 payload = JsonSerializer.Serialize(new
                 {
-                    type = "state-diff",
+                    type = "stateDiff",
+                    originId = _localInstanceId,
+                    sequence,
+                    timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     role,
-                    diff,
-                    ts = DateTime.UtcNow.Ticks
+                    diff = diffCopy
                 });
 
                 RecordDiffSample(diff.Count);
@@ -97,21 +114,41 @@ namespace SharedCockpitClient.Sync
             {
                 _ = websocket.SendAsync(payload);
                 Log(logLine!);
+                var surfaces = diffCopy != null ? BuildSurfaceLog(diffCopy) : null;
+                if (!string.IsNullOrEmpty(surfaces))
+                    Console.WriteLine(surfaces);
             }
         }
 
-        public void ApplyRemoteDiff(string? role, Dictionary<string, object?> diff)
+        public void ApplyRemoteDiff(string? role, string? originId, long sequence, Dictionary<string, object?> diff)
         {
             if (diff == null || diff.Count == 0)
                 return;
 
             Dictionary<string, object?>? filtered = null;
             string logLine;
+            Guid originGuid = Guid.Empty;
+
+            if (!string.IsNullOrWhiteSpace(originId))
+            {
+                if (string.Equals(originId, _localInstanceId, StringComparison.OrdinalIgnoreCase))
+                    return;
+
+                Guid.TryParse(originId, out originGuid);
+            }
 
             lock (syncLock)
             {
                 if (lastSnapshot == null)
                     lastSnapshot = new SimStateSnapshot();
+
+                if (originGuid != Guid.Empty)
+                {
+                    if (_lastSequenceByOrigin.TryGetValue(originGuid, out var lastSeq) && sequence <= lastSeq)
+                        return;
+
+                    _lastSequenceByOrigin[originGuid] = sequence;
+                }
 
                 filtered = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
                 foreach (var kv in diff)
@@ -138,6 +175,9 @@ namespace SharedCockpitClient.Sync
             }
 
             Log(logLine);
+            var surfaces = BuildSurfaceLog(filtered);
+            if (!string.IsNullOrEmpty(surfaces))
+                Console.WriteLine(surfaces);
         }
 
         private Dictionary<string, object?> CalculateDiff(SimStateSnapshot? previous, SimStateSnapshot current)
@@ -196,6 +236,118 @@ namespace SharedCockpitClient.Sync
                 span = 1;
 
             currentDiffRate = total / span;
+        }
+
+        private void HandleLocalCommand(SimCommandMessage command)
+        {
+            if (command == null)
+                return;
+
+            var sequence = Interlocked.Increment(ref _localSequence);
+            var payload = JsonSerializer.Serialize(new
+            {
+                type = "command",
+                originId = _localInstanceId,
+                sequence,
+                timestamp = command.Timestamp,
+                eventName = command.NormalizedEvent,
+                path = command.SourcePath,
+                value = command.Value
+            });
+
+            Console.WriteLine($"[RealtimeSync] 🛠 Control enviado: {command.NormalizedEvent}");
+            _ = websocket.SendAsync(payload);
+        }
+
+        private void HandleRemoteCommand(CommandPayload payload)
+        {
+            if (payload == null)
+                return;
+
+            if (!string.IsNullOrWhiteSpace(payload.OriginId) &&
+                string.Equals(payload.OriginId, _localInstanceId, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var originGuid = Guid.Empty;
+            if (!string.IsNullOrWhiteSpace(payload.OriginId))
+                Guid.TryParse(payload.OriginId, out originGuid);
+
+            lock (syncLock)
+            {
+                if (originGuid != Guid.Empty)
+                {
+                    if (_lastSequenceByOrigin.TryGetValue(originGuid, out var lastSeq) && payload.Sequence <= lastSeq)
+                        return;
+
+                    _lastSequenceByOrigin[originGuid] = payload.Sequence;
+                }
+            }
+
+            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {payload.Event} (from {payload.OriginId ?? "remote"})");
+            var path = payload.Path ?? payload.NormalizedEvent;
+            _ = simManager.ApplyRemoteChangeAsync(path, payload.Value, CancellationToken.None);
+        }
+
+        private static string? BuildSurfaceLog(IReadOnlyDictionary<string, object?> diff)
+        {
+            if (diff == null || diff.Count == 0)
+                return null;
+
+            var segments = new List<string>();
+
+            if (TryFormatControl(diff, "SimVars.AILERON POSITION", out var aileron))
+                segments.Add($"Aileron={aileron}");
+            if (TryFormatControl(diff, "SimVars.ELEVATOR POSITION", out var elevator))
+                segments.Add($"Elevator={elevator}");
+            if (TryFormatControl(diff, "SimVars.RUDDER POSITION", out var rudder))
+                segments.Add($"Rudder={rudder}");
+            if (TryFormatControl(diff, "SimVars.FLAPS HANDLE INDEX", out var flaps, format: "0"))
+                segments.Add($"Flaps={flaps}");
+            if (TryFormatControl(diff, "SimVars.GEAR HANDLE POSITION", out var gear, format: "0"))
+                segments.Add($"Gear={(gear == "0" ? "UP" : "DOWN")}");
+
+            if (segments.Count == 0)
+                return null;
+
+            return "[RealtimeSync] 📡 Superficies actualizadas: " + string.Join(" | ", segments);
+        }
+
+        private static bool TryFormatControl(IReadOnlyDictionary<string, object?> diff, string key, out string formatted, string format = "0.00")
+        {
+            formatted = string.Empty;
+            if (!diff.TryGetValue(key, out var value) || value is null)
+                return false;
+
+            switch (value)
+            {
+                case double d:
+                    formatted = d.ToString(format);
+                    return true;
+                case float f:
+                    formatted = f.ToString(format);
+                    return true;
+                case int i:
+                    formatted = i.ToString(format);
+                    return true;
+                case long l:
+                    formatted = l.ToString(format);
+                    return true;
+                case bool b:
+                    formatted = b ? "1" : "0";
+                    return true;
+                default:
+                    var str = Convert.ToString(value);
+                    if (string.IsNullOrWhiteSpace(str))
+                        return false;
+                    formatted = str!;
+                    return true;
+            }
+        }
+
+        public void Dispose()
+        {
+            simManager.OnCommand -= HandleLocalCommand;
+            websocket.OnCommand -= HandleRemoteCommand;
         }
 
         private static string FormatLogLine(string role, string direction, IEnumerable<string> keys, int totalCount)

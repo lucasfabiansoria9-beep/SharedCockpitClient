@@ -1,10 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.FlightSimulator.SimConnect;
-using SharedCockpitClient.Tools;
 
 namespace SharedCockpitClient.FlightData
 {
@@ -26,15 +24,28 @@ namespace SharedCockpitClient.FlightData
         private bool _offlineMode;
         private bool _initialSnapshotQueued;
         private readonly Dictionary<string, object?> lastValues = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<uint, SimVarDescriptor> _requestToDescriptor = new();
+        private readonly Dictionary<string, uint> _definitionByKey = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<uint, SimEventDescriptor> _clientEventById = new();
+        private readonly Dictionary<string, uint> _eventClientByName = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<uint, DateTime> _pendingEventEcho = new();
+        private readonly Guid _localInstanceId = Guid.NewGuid();
+        private long _commandSequence;
+        private long _snapshotSequence;
+
+        private const uint DATA_DEFINITION_BASE = 1000;
+        private const uint DATA_REQUEST_BASE = 2000;
+        private const uint EVENT_ID_BASE = 3000;
+        private const uint GROUP_COMMANDS = 42;
 
         public event Action<SimStateSnapshot, bool>? OnSnapshot;
+        public event Action<SimCommandMessage>? OnCommand;
 
         public bool IsConnected { get; private set; }
 
         public double LastFps { get; private set; } = -1;
 
-        private enum DEFINITIONS { SnapshotStruct = 1 }
-        private enum REQUESTS { SnapshotRequest = 1 }
+        public Guid LocalInstanceId => _localInstanceId;
 
         public SimConnectManager(AircraftStateManager aircraftState)
         {
@@ -58,8 +69,8 @@ namespace SharedCockpitClient.FlightData
             _collector.OnSnapshot += HandleSnapshot;
 
             _commandApplier = new SimCommandApplier(
-                (desc, val, ct) => ApplySimVarChangeAsync(desc.Path, val, ct),
-                (desc, val, ct) => TriggerSimEventAsync(desc.Path, val, ct),
+                ApplySimVarChangeAsync,
+                TriggerSimEventAsync,
                 MirrorState);
         }
 
@@ -73,55 +84,6 @@ namespace SharedCockpitClient.FlightData
                 _simConnect = new SimConnect("SharedCockpitClient", _windowHandle, 0, null, 0);
                 OnSimConnectOpened();
 
-                if (!SimVarCatalogGenerator.TryGetCatalog(out var catalog))
-                {
-                    Console.WriteLine("[SimConnect] ⚠️ No se encontró catálogo de SimVars/SimEvents embebido.");
-                    return;
-                }
-
-                // 1️⃣ Crear una definición de datos unificada
-                var registeredCount = 0;
-                var hadScanErrors = false;
-
-                foreach (var simVar in catalog.SimVars)
-                {
-                    try
-                    {
-                        _simConnect.AddToDataDefinition(
-                            DEFINITIONS.SnapshotStruct,
-                            simVar.Name,
-                            simVar.Units ?? string.Empty,
-                            simVar.DataType switch
-                            {
-                                SimDataType.Float32 => SIMCONNECT_DATATYPE.FLOAT32,
-                                SimDataType.Int32 => SIMCONNECT_DATATYPE.INT32,
-                                SimDataType.Bool => SIMCONNECT_DATATYPE.INT32,
-                                SimDataType.String256 => SIMCONNECT_DATATYPE.STRING256,
-                                _ => SIMCONNECT_DATATYPE.FLOAT64
-                            },
-                            0.0f,
-                            SimConnect.SIMCONNECT_UNUSED
-                        );
-                        registeredCount++;
-                    }
-                    catch (Exception)
-                    {
-                        hadScanErrors = true;
-                    }
-                }
-
-                _simConnect.RegisterDataDefineStruct<SnapshotStruct>(DEFINITIONS.SnapshotStruct);
-
-                if (hadScanErrors)
-                {
-                    Console.WriteLine("[SimConnect] ℹ️ Catálogo parcial cargado (algunas entradas fueron ignoradas por seguridad).");
-                }
-                else
-                {
-                    Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {registeredCount} variables.");
-                }
-
-                // 2️⃣ Suscripción a eventos básicos
                 _simConnect.OnRecvOpen += (_, _) => OnSimConnectOpened();
                 _simConnect.OnRecvQuit += (_, _) =>
                 {
@@ -133,8 +95,6 @@ namespace SharedCockpitClient.FlightData
                 };
                 _simConnect.OnRecvException += (_, ex) =>
                     Console.WriteLine($"[SimConnect] ⚠️ Excepción: {ex.dwException}");
-
-                // 3️⃣ Recepción de datos del simulador
                 _simConnect.OnRecvSimobjectData += (_, data) =>
                 {
                     try
@@ -146,29 +106,12 @@ namespace SharedCockpitClient.FlightData
                         Console.WriteLine($"[SimConnect] ⚠️ Error procesando snapshot: {ex.Message}");
                     }
                 };
+                _simConnect.OnRecvEvent += HandleSimConnectEvent;
 
-                // 4️⃣ Polling periódico
-                Task.Run(async () =>
-                {
-                    while (_simConnect != null)
-                    {
-                        try
-                        {
-                            _simConnect.RequestDataOnSimObject(
-                                REQUESTS.SnapshotRequest,
-                                DEFINITIONS.SnapshotStruct,
-                                SimConnect.SIMCONNECT_OBJECT_ID_USER,
-                                SIMCONNECT_PERIOD.SIM_FRAME,
-                                SIMCONNECT_DATA_REQUEST_FLAG.DEFAULT,
-                                0,
-                                0,
-                                0
-                            );
-                        }
-                        catch { }
-                        await Task.Delay(200);
-                    }
-                });
+                var registeredVars = RegisterSimVarSubscriptions();
+                var registeredEvents = RegisterSimEvents();
+
+                Console.WriteLine($"[SimConnect] 📘 Catálogo cargado: {registeredVars} variables, {registeredEvents} eventos.");
             }
             catch (Exception ex)
             {
@@ -198,24 +141,148 @@ namespace SharedCockpitClient.FlightData
             }
         }
 
-        private void OnRecvSimobjectData(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private int RegisterSimVarSubscriptions()
         {
-            var changed = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var kvp in ExtractVars(data))
+            if (_simConnect == null)
+                return 0;
+
+            _requestToDescriptor.Clear();
+            _definitionByKey.Clear();
+
+            var registered = 0;
+            var definitionId = DATA_DEFINITION_BASE;
+            var requestId = DATA_REQUEST_BASE;
+
+            foreach (var descriptor in SimDataDefinition.AllSimVars)
             {
-                if (!lastValues.ContainsKey(kvp.Key) || !Equals(lastValues[kvp.Key], kvp.Value))
+                try
                 {
-                    lastValues[kvp.Key] = kvp.Value;
-                    changed[kvp.Key] = kvp.Value;
+                    var defId = (SIMCONNECT_DATA_DEFINITION_ID)definitionId++;
+                    var reqId = (SIMCONNECT_DATA_REQUEST_ID)requestId++;
+                    var simType = descriptor.DataType switch
+                    {
+                        SimDataType.Float32 => SIMCONNECT_DATATYPE.FLOAT32,
+                        SimDataType.Int32 => SIMCONNECT_DATATYPE.INT32,
+                        SimDataType.Bool => SIMCONNECT_DATATYPE.INT32,
+                        SimDataType.String256 => SIMCONNECT_DATATYPE.STRING256,
+                        _ => SIMCONNECT_DATATYPE.FLOAT64
+                    };
+
+                    _simConnect.AddToDataDefinition(defId, descriptor.Name, descriptor.Units ?? string.Empty, simType, 0.0f, SimConnect.SIMCONNECT_UNUSED);
+                    RegisterStructForDescriptor(defId, descriptor.DataType);
+
+                    var key = descriptor.DefinitionKey;
+                    _definitionByKey[key] = (uint)defId;
+                    _definitionByKey[descriptor.Name] = (uint)defId;
+                    _definitionByKey[BuildSimVarKey(descriptor)] = (uint)defId;
+
+                    _requestToDescriptor[(uint)reqId] = descriptor;
+
+                    _simConnect.RequestDataOnSimObject(reqId, defId, SimConnect.SIMCONNECT_OBJECT_ID_USER,
+                        SIMCONNECT_PERIOD.SIM_FRAME, SIMCONNECT_DATA_REQUEST_FLAG.CHANGED, 0, 0, 0);
+                    _simConnect.RequestDataOnSimObjectType(reqId, defId, 0, SIMCONNECT_SIMOBJECT_TYPE.USER);
+                    registered++;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[SimConnect] ⚠️ No se pudo registrar SimVar {descriptor.Name}: {ex.Message}");
                 }
             }
 
-            if (changed.Count == 0)
+            return registered;
+        }
+
+        private int RegisterSimEvents()
+        {
+            if (_simConnect == null)
+                return 0;
+
+            _clientEventById.Clear();
+            _eventClientByName.Clear();
+
+            var groupId = (SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS;
+            var eventId = EVENT_ID_BASE;
+            var registered = 0;
+
+            foreach (var descriptor in SimDataDefinition.AllSimEvents)
             {
-                return;
+                try
+                {
+                    var clientId = (SIMCONNECT_CLIENT_EVENT_ID)eventId++;
+                    _simConnect.MapClientEventToSimEvent(clientId, descriptor.EventName);
+                    _simConnect.AddClientEventToNotificationGroup(groupId, clientId, false);
+
+                    _clientEventById[(uint)clientId] = descriptor;
+
+                    var normalized = SimDataDefinition.NormalizeEventName(descriptor.EventName);
+                    if (!string.IsNullOrWhiteSpace(normalized))
+                        _eventClientByName[normalized] = (uint)clientId;
+                    if (!string.IsNullOrWhiteSpace(descriptor.Path))
+                        _eventClientByName[descriptor.Path] = (uint)clientId;
+
+                    registered++;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[SimConnect] ⚠️ No se pudo mapear evento {descriptor.EventName}: {ex.Message}");
+                }
             }
 
-            var snapshot = new SimStateSnapshot(changed, DateTime.UtcNow, true);
+            _simConnect.SetNotificationGroupPriority(groupId, (uint)SIMCONNECT_GROUP_PRIORITY.HIGHEST);
+            return registered;
+        }
+
+        private void HandleSimConnectEvent(SimConnect sender, SIMCONNECT_RECV_EVENT data)
+        {
+            if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
+                return;
+
+            lock (_pendingEventEcho)
+            {
+                if (_pendingEventEcho.TryGetValue((uint)data.uEventID, out var expiry))
+                {
+                    if (DateTime.UtcNow <= expiry)
+                    {
+                        _pendingEventEcho.Remove((uint)data.uEventID);
+                        return;
+                    }
+
+                    _pendingEventEcho.Remove((uint)data.uEventID);
+                }
+            }
+
+            var normalized = SimDataDefinition.NormalizeEventName(descriptor.EventName);
+            var sequence = Interlocked.Increment(ref _commandSequence);
+            var message = new SimCommandMessage(normalized, _localInstanceId, sequence,
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), descriptor.Path, data.dwData);
+
+            Console.WriteLine($"[RealtimeSync] 🛠 Control recibido: {normalized} (local)");
+            OnCommand?.Invoke(message);
+        }
+
+
+        private void OnRecvSimobjectData(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        {
+            if (data.dwRequestID == 0 || !_requestToDescriptor.TryGetValue(data.dwRequestID, out var descriptor))
+                return;
+
+            if (!TryReadIncomingValue(descriptor, data.dwData, out var stateValue))
+                return;
+
+            var key = BuildSimVarKey(descriptor);
+
+            if (lastValues.TryGetValue(key, out var previous) && Equals(previous, stateValue))
+                return;
+
+            lastValues[key] = stateValue;
+
+            var diff = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+            {
+                [key] = stateValue
+            };
+
+            var sequence = Interlocked.Increment(ref _snapshotSequence);
+            var snapshot = new SimStateSnapshot(diff, DateTime.UtcNow, true, sequence);
 
             lock (_snapshotLock)
                 _lastSnapshot = _lastSnapshot.MergeDiff(snapshot);
@@ -224,19 +291,156 @@ namespace SharedCockpitClient.FlightData
             OnSnapshot?.Invoke(snapshot, true);
         }
 
-        private static IEnumerable<KeyValuePair<string, object?>> ExtractVars(SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void RegisterStructForDescriptor(SIMCONNECT_DATA_DEFINITION_ID definitionId, SimDataType type)
         {
-            if (data.dwData == null || data.dwData.Length == 0)
+            if (_simConnect == null)
+                return;
+
+            try
             {
-                yield break;
+                switch (type)
+                {
+                    case SimDataType.Float32:
+                    case SimDataType.Float64:
+                        _simConnect.RegisterDataDefineStruct<double>(definitionId);
+                        break;
+                    case SimDataType.Int32:
+                    case SimDataType.Bool:
+                        _simConnect.RegisterDataDefineStruct<int>(definitionId);
+                        break;
+                    case SimDataType.String256:
+                        _simConnect.RegisterDataDefineStruct<string>(definitionId);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SimConnect] ⚠️ Error registrando estructura para {definitionId}: {ex.Message}");
+            }
+        }
+
+        private static string BuildSimVarKey(SimVarDescriptor descriptor)
+            => $"SimVars.{descriptor.Name}";
+
+        private bool TryReadIncomingValue(SimVarDescriptor descriptor, object[]? rawData, out object? value)
+        {
+            value = null;
+            if (rawData == null || rawData.Length == 0)
+                return false;
+
+            var raw = rawData[0];
+
+            try
+            {
+                switch (descriptor.DataType)
+                {
+                    case SimDataType.Float64:
+                    case SimDataType.Float32:
+                        value = Convert.ToDouble(raw);
+                        return true;
+                    case SimDataType.Int32:
+                        value = Convert.ToInt32(raw);
+                        return true;
+                    case SimDataType.Bool:
+                        value = raw switch
+                        {
+                            bool b => b,
+                            int i => i != 0,
+                            uint ui => ui != 0,
+                            long l => l != 0,
+                            double d => Math.Abs(d) > double.Epsilon,
+                            string s when bool.TryParse(s, out var parsedBool) => parsedBool,
+                            string s when int.TryParse(s, out var parsedInt) => parsedInt != 0,
+                            _ => Convert.ToInt32(raw) != 0
+                        };
+                        return true;
+                    case SimDataType.String256:
+                        value = Convert.ToString(raw) ?? string.Empty;
+                        return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SimConnect] ⚠️ Error leyendo {descriptor.Name}: {ex.Message}");
             }
 
-            var snapshot = (SnapshotStruct)data.dwData[0];
-            yield return new KeyValuePair<string, object?>("SimVars.Altitude", snapshot.Altitude);
-            yield return new KeyValuePair<string, object?>("SimVars.Airspeed", snapshot.Airspeed);
-            yield return new KeyValuePair<string, object?>("SimVars.Heading", snapshot.Heading);
-            yield return new KeyValuePair<string, object?>("SimVars.Pitch", snapshot.Pitch);
-            yield return new KeyValuePair<string, object?>("SimVars.Bank", snapshot.Bank);
+            return false;
+        }
+
+        private bool TryGetDefinitionId(SimVarDescriptor descriptor, out SIMCONNECT_DATA_DEFINITION_ID definitionId)
+        {
+            if (_definitionByKey.TryGetValue(descriptor.DefinitionKey, out var id) ||
+                _definitionByKey.TryGetValue(descriptor.Name, out id) ||
+                _definitionByKey.TryGetValue(BuildSimVarKey(descriptor), out id))
+            {
+                definitionId = (SIMCONNECT_DATA_DEFINITION_ID)id;
+                return true;
+            }
+
+            definitionId = 0;
+            return false;
+        }
+
+        private bool TryConvertOutgoingValue(SimVarDescriptor descriptor, object? value, out object? normalized, out object? payload)
+        {
+            normalized = null;
+            payload = null;
+
+            try
+            {
+                switch (descriptor.DataType)
+                {
+                    case SimDataType.Float32:
+                    case SimDataType.Float64:
+                        var dbl = Convert.ToDouble(value ?? 0);
+                        normalized = dbl;
+                        payload = dbl;
+                        return true;
+                    case SimDataType.Int32:
+                        var intVal = Convert.ToInt32(value ?? 0);
+                        normalized = intVal;
+                        payload = intVal;
+                        return true;
+                    case SimDataType.Bool:
+                        var boolVal = value switch
+                        {
+                            bool b => b,
+                            int i => i != 0,
+                            long l => l != 0,
+                            double d => Math.Abs(d) > double.Epsilon,
+                            string s when bool.TryParse(s, out var parsedBool) => parsedBool,
+                            string s when int.TryParse(s, out var parsedInt) => parsedInt != 0,
+                            _ => Convert.ToInt32(value ?? 0) != 0
+                        };
+                        normalized = boolVal;
+                        payload = boolVal ? 1 : 0;
+                        return true;
+                    case SimDataType.String256:
+                        var strVal = Convert.ToString(value) ?? string.Empty;
+                        normalized = strVal;
+                        payload = strVal;
+                        return true;
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[SimConnect] ⚠️ Error convirtiendo valor para {descriptor.Name}: {ex.Message}");
+            }
+
+            return false;
+        }
+
+        private bool TryGetClientEventId(SimEventDescriptor descriptor, out SIMCONNECT_CLIENT_EVENT_ID clientEventId)
+        {
+            if (_eventClientByName.TryGetValue(descriptor.Path, out var id) ||
+                _eventClientByName.TryGetValue(SimDataDefinition.NormalizeEventName(descriptor.EventName), out id))
+            {
+                clientEventId = (SIMCONNECT_CLIENT_EVENT_ID)id;
+                return true;
+            }
+
+            clientEventId = 0;
+            return false;
         }
 
         private async Task EmitInitialSnapshotWithDelayAsync()
@@ -258,17 +462,6 @@ namespace SharedCockpitClient.FlightData
             {
                 Console.WriteLine("[SimConnect] ⚠️ Snapshot inicial omitido (sin datos)");
             }
-        }
-
-        // Estructura interna de ejemplo (temporal hasta usar catálogo completo)
-        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Ansi, Pack = 1)]
-        private struct SnapshotStruct
-        {
-            public double Altitude;
-            public double Airspeed;
-            public double Heading;
-            public double Pitch;
-            public double Bank;
         }
 
         // ------------------------------------------------------------------
@@ -327,37 +520,69 @@ namespace SharedCockpitClient.FlightData
         public Task<bool> ApplyRemoteChangeAsync(string path, object? value, CancellationToken ct)
             => _commandApplier.ApplyAsync(path, value, ct);
 
-        private async Task<bool> ApplySimVarChangeAsync(string path, object? value, CancellationToken ct)
+        private Task<bool> ApplySimVarChangeAsync(SimVarDescriptor descriptor, object? value, CancellationToken ct)
         {
+            if (_simConnect == null)
+                return Task.FromResult(false);
+
+            if (!TryGetDefinitionId(descriptor, out var definitionId))
+                return Task.FromResult(false);
+
+            if (!TryConvertOutgoingValue(descriptor, value, out var normalized, out var payload))
+                return Task.FromResult(false);
+
             try
             {
-                if (_simConnect == null) return false;
-                Console.WriteLine($"[SimConnect] ⇢ Set {path} = {value}");
-                MirrorState(path, value);
-                await Task.CompletedTask;
-                return true;
+                _simConnect.SetDataOnSimObject(definitionId, SimConnect.SIMCONNECT_OBJECT_ID_USER, SIMCONNECT_DATA_SET_FLAG.DEFAULT, payload!);
+                var key = BuildSimVarKey(descriptor);
+                Console.WriteLine($"[SimConnect] ⇢ Set {key} = {normalized}");
+                MirrorState(key, normalized);
+                return Task.FromResult(true);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error aplicando cambio {path}: {ex.Message}");
-                return false;
+                Console.WriteLine($"[SimConnect] ⚠️ Error aplicando cambio {descriptor.Name}: {ex.Message}");
+                return Task.FromResult(false);
             }
         }
 
-        private async Task<bool> TriggerSimEventAsync(string eventName, object? value, CancellationToken ct)
+        private Task<bool> TriggerSimEventAsync(SimEventDescriptor descriptor, object? value, CancellationToken ct)
         {
+            if (_simConnect == null)
+                return Task.FromResult(false);
+
+            if (!TryGetClientEventId(descriptor, out var clientEvent))
+                return Task.FromResult(false);
+
+            uint eventData = value switch
+            {
+                uint ui => ui,
+                int i => (uint)i,
+                long l => (uint)l,
+                bool b => b ? 1u : 0u,
+                double d => (uint)d,
+                _ => 0u
+            };
+
             try
             {
-                if (_simConnect == null) return false;
-                Console.WriteLine($"[SimConnect] ⇢ Event {eventName} ({value})");
-                MirrorState(eventName, value);
-                await Task.CompletedTask;
-                return true;
+                lock (_pendingEventEcho)
+                    _pendingEventEcho[(uint)clientEvent] = DateTime.UtcNow.AddMilliseconds(500);
+
+                _simConnect.TransmitClientEvent(
+                    SimConnect.SIMCONNECT_OBJECT_ID_USER,
+                    clientEvent,
+                    eventData,
+                    (SIMCONNECT_NOTIFICATION_GROUP_ID)GROUP_COMMANDS,
+                    SIMCONNECT_EVENT_FLAG.GROUPID_IS_PRIORITY);
+
+                Console.WriteLine($"[SimConnect] ⇢ Event {descriptor.EventName} ({eventData})");
+                return Task.FromResult(true);
             }
             catch (Exception ex)
             {
-                Console.WriteLine($"[SimConnect] ⚠️ Error disparando evento {eventName}: {ex.Message}");
-                return false;
+                Console.WriteLine($"[SimConnect] ⚠️ Error disparando evento {descriptor.EventName}: {ex.Message}");
+                return Task.FromResult(false);
             }
         }
 
@@ -385,9 +610,28 @@ namespace SharedCockpitClient.FlightData
 
         private void MirrorState(string path, object? value)
         {
+            if (string.IsNullOrWhiteSpace(path))
+                return;
+
+            string canonicalPath = path;
+            object? normalized = value;
+
+            if (SimDataDefinition.TryGetVar(path, out var descriptor) ||
+                SimDataDefinition.TryGetVarBySimVarKey(path, out descriptor))
+            {
+                canonicalPath = BuildSimVarKey(descriptor);
+                if (TryConvertOutgoingValue(descriptor, value, out var normalizedValue, out _))
+                    normalized = normalizedValue;
+                lastValues[canonicalPath] = normalized;
+            }
+            else if (path.StartsWith("SimVars.", StringComparison.OrdinalIgnoreCase))
+            {
+                lastValues[path] = normalized;
+            }
+
             lock (_snapshotLock)
-                _lastSnapshot.Set(path, value);
-            _aircraftState.Set(path, value);
+                _lastSnapshot.Set(canonicalPath, normalized);
+            _aircraftState.Set(canonicalPath, normalized);
         }
 
         public SimStateSnapshot GetLastSnapshot()
@@ -413,17 +657,20 @@ namespace SharedCockpitClient.FlightData
 
         public void ApplySimVar(string path, object? value)
         {
-            if (string.IsNullOrWhiteSpace(path))
+            if (string.IsNullOrWhiteSpace(path) || value is null)
                 return;
+
+            if (SimDataDefinition.TryGetVar(path, out var descriptor) ||
+                SimDataDefinition.TryGetVarBySimVarKey(path, out descriptor))
+            {
+                _ = _commandApplier.ApplyAsync(descriptor.Path, value, CancellationToken.None);
+                return;
+            }
 
             if (!SimStateSnapshot.LooksLikeSimVar(path))
                 return;
 
-            if (value is null)
-                return;
-
             MirrorState(path, value);
-            _ = ApplyRemoteChangeAsync(path, value, CancellationToken.None);
         }
 
         public void Dispose()

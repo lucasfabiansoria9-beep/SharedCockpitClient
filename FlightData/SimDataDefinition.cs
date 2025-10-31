@@ -39,27 +39,102 @@ namespace SharedCockpitClient.FlightData
         private static readonly Lazy<IReadOnlyDictionary<string, SimVarDescriptor>> _varsByPath
             = new(() => _allVars.Value.ToDictionary(v => v.Path, v => v, StringComparer.OrdinalIgnoreCase));
 
+        private static readonly Lazy<IReadOnlyDictionary<string, SimVarDescriptor>> _varsBySimVarName
+            = new(() =>
+            {
+                var dict = new Dictionary<string, SimVarDescriptor>(StringComparer.OrdinalIgnoreCase);
+                foreach (var descriptor in _allVars.Value)
+                {
+                    var key = $"SimVars.{descriptor.Name}";
+                    if (!dict.ContainsKey(key))
+                        dict[key] = descriptor;
+
+                    if (descriptor.Index.HasValue)
+                    {
+                        var indexKey = $"SimVars.{descriptor.DefinitionKey}";
+                        if (!dict.ContainsKey(indexKey))
+                            dict[indexKey] = descriptor;
+                    }
+                }
+
+                return dict;
+            });
+
         private static readonly Lazy<IReadOnlyList<SimEventDescriptor>> _allEvents = new(() => BuildEvents());
 
         private static readonly Lazy<IReadOnlyDictionary<string, SimEventDescriptor>> _eventsByPath
             = new(() => _allEvents.Value.ToDictionary(e => e.Path, e => e, StringComparer.OrdinalIgnoreCase));
 
+        private static readonly Lazy<IReadOnlyDictionary<string, SimEventDescriptor>> _eventsByNormalizedName
+            = new(() =>
+            {
+                var dict = new Dictionary<string, SimEventDescriptor>(StringComparer.OrdinalIgnoreCase);
+                foreach (var descriptor in _allEvents.Value)
+                {
+                    var normalized = NormalizeEventName(descriptor.EventName);
+                    if (!string.IsNullOrWhiteSpace(normalized) && !dict.ContainsKey(normalized))
+                        dict[normalized] = descriptor;
+                }
+
+                return dict;
+            });
+
         public static IReadOnlyList<SimVarDescriptor> AllSimVars => _allVars.Value;
 
         public static IReadOnlyDictionary<string, SimVarDescriptor> VarsByPath => _varsByPath.Value;
 
+        public static IReadOnlyDictionary<string, SimVarDescriptor> VarsBySimVarName => _varsBySimVarName.Value;
+
         public static IReadOnlyList<SimEventDescriptor> AllSimEvents => _allEvents.Value;
 
         public static IReadOnlyDictionary<string, SimEventDescriptor> EventsByPath => _eventsByPath.Value;
+
+        public static IReadOnlyDictionary<string, SimEventDescriptor> EventsByNormalizedName => _eventsByNormalizedName.Value;
 
         public static bool TryGetVar(string path, out SimVarDescriptor descriptor)
         {
             return VarsByPath.TryGetValue(path, out descriptor!);
         }
 
+        public static bool TryGetVarBySimVarKey(string simVarKey, out SimVarDescriptor descriptor)
+        {
+            if (string.IsNullOrWhiteSpace(simVarKey))
+            {
+                descriptor = null!;
+                return false;
+            }
+
+            if (!simVarKey.StartsWith("SimVars.", StringComparison.OrdinalIgnoreCase))
+                simVarKey = $"SimVars.{simVarKey}";
+
+            return VarsBySimVarName.TryGetValue(simVarKey, out descriptor!);
+        }
+
         public static bool TryGetEvent(string path, out SimEventDescriptor descriptor)
         {
             return EventsByPath.TryGetValue(path, out descriptor!);
+        }
+
+        public static bool TryGetEventByName(string eventName, out SimEventDescriptor descriptor)
+        {
+            descriptor = null!;
+            if (string.IsNullOrWhiteSpace(eventName))
+                return false;
+
+            var normalized = NormalizeEventName(eventName);
+            return EventsByNormalizedName.TryGetValue(normalized, out descriptor!);
+        }
+
+        public static string NormalizeEventName(string eventName)
+        {
+            if (string.IsNullOrWhiteSpace(eventName))
+                return eventName;
+
+            var trimmed = eventName.Trim();
+            if (trimmed.StartsWith("K:", StringComparison.OrdinalIgnoreCase))
+                trimmed = trimmed.Substring(2);
+
+            return trimmed;
         }
 
         private static IReadOnlyList<SimVarDescriptor> BuildVarList()

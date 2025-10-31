@@ -29,7 +29,8 @@ namespace SharedCockpitClient.Network
         private readonly TaskCompletionSource<bool> readyTcs = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         public event Action<string>? OnMessage;
-        public event Action<string?, Dictionary<string, object?>>? OnStateDiff;
+        public event Action<string?, string?, long, Dictionary<string, object?>>? OnStateDiff;
+        public event Action<CommandPayload>? OnCommand;
 
         public WebSocketManager(bool isHost, Uri? peer = null, int? portOverride = null)
         {
@@ -238,6 +239,7 @@ namespace SharedCockpitClient.Network
 
             OnMessage?.Invoke(json);
             TryEmitStateDiff(json);
+            TryEmitCommand(json);
         }
 
         private bool TryHandleInternalMessage(string json)
@@ -306,11 +308,73 @@ namespace SharedCockpitClient.Network
                     role = roleProperty.GetString();
                 }
 
+                string? originId = null;
+                if (root.TryGetProperty("originId", out var originProperty) && originProperty.ValueKind == JsonValueKind.String)
+                {
+                    originId = originProperty.GetString();
+                }
+
+                long sequence = 0;
+                if (root.TryGetProperty("sequence", out var seqProperty) && seqProperty.ValueKind == JsonValueKind.Number)
+                {
+                    sequence = seqProperty.GetInt64();
+                }
+
                 if (!root.TryGetProperty("diff", out var diffProperty) || diffProperty.ValueKind != JsonValueKind.Object)
                     return;
 
                 var diff = ReadDiffDictionary(diffProperty);
-                OnStateDiff?.Invoke(role, diff);
+                OnStateDiff?.Invoke(role, originId, sequence, diff);
+            }
+            catch (JsonException)
+            {
+                // mensaje no compatible
+            }
+        }
+
+        private void TryEmitCommand(string json)
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(json);
+                var root = document.RootElement;
+                if (!root.TryGetProperty("type", out var typeProperty) ||
+                    !string.Equals(typeProperty.GetString(), "command", StringComparison.OrdinalIgnoreCase))
+                {
+                    return;
+                }
+
+                string? eventName = null;
+                if (root.TryGetProperty("eventName", out var eventNameProp) && eventNameProp.ValueKind == JsonValueKind.String)
+                    eventName = eventNameProp.GetString();
+                if (string.IsNullOrWhiteSpace(eventName) && root.TryGetProperty("event", out var eventProp) && eventProp.ValueKind == JsonValueKind.String)
+                    eventName = eventProp.GetString();
+                if (string.IsNullOrWhiteSpace(eventName))
+                    return;
+
+                string? originId = null;
+                if (root.TryGetProperty("originId", out var originProp) && originProp.ValueKind == JsonValueKind.String)
+                    originId = originProp.GetString();
+
+                long sequence = 0;
+                if (root.TryGetProperty("sequence", out var seqProp) && seqProp.ValueKind == JsonValueKind.Number)
+                    sequence = seqProp.GetInt64();
+
+                long timestamp = 0;
+                if (root.TryGetProperty("timestamp", out var tsProp) && tsProp.ValueKind == JsonValueKind.Number)
+                    timestamp = tsProp.GetInt64();
+
+                string? path = null;
+                if (root.TryGetProperty("path", out var pathProp) && pathProp.ValueKind == JsonValueKind.String)
+                    path = pathProp.GetString();
+
+                object? value = null;
+                if (root.TryGetProperty("value", out var valueProp))
+                    value = ReadJsonValue(valueProp);
+                else if (root.TryGetProperty("data", out var dataProp))
+                    value = ReadJsonValue(dataProp);
+
+                OnCommand?.Invoke(new CommandPayload(eventName!, originId, sequence, timestamp, path, value));
             }
             catch (JsonException)
             {

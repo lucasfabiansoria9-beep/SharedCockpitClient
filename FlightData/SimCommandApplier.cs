@@ -27,12 +27,24 @@ namespace SharedCockpitClient.FlightData
 
             var applied = false;
 
-            if (SimDataDefinition.TryGetVar(path, out var descriptor) && descriptor.Writable)
+            if (!SimDataDefinition.TryGetVar(path, out var descriptor) &&
+                !SimDataDefinition.TryGetVarBySimVarKey(path, out descriptor))
+            {
+                descriptor = null;
+            }
+
+            if (descriptor != null && descriptor.Writable)
             {
                 applied |= await _varWriter(descriptor, value, ct).ConfigureAwait(false);
             }
 
-            if (SimDataDefinition.TryGetEvent(path, out var evt))
+            if (!SimDataDefinition.TryGetEvent(path, out var evt) &&
+                !SimDataDefinition.TryGetEventByName(path, out evt))
+            {
+                evt = null;
+            }
+
+            if (evt != null)
             {
                 applied |= await _eventWriter(evt, value, ct).ConfigureAwait(false);
             }
