@@ -38,18 +38,7 @@
       <HintPath>libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll</HintPath>
       <Private>true</Private>
     </Reference>
-
-    <Reference Include="Microsoft.FlightSimulator.SimConnect"
-               Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll') and Exists('C:\MSFS 2024 SDK\SimConnect SDK\lib\managed\Microsoft.FlightSimulator.SimConnect.dll')">
-      <HintPath>C:\MSFS 2024 SDK\SimConnect SDK\lib\managed\Microsoft.FlightSimulator.SimConnect.dll</HintPath>
-      <Private>true</Private>
-    </Reference>
   </ItemGroup>
-
-  <!-- 🧩 Modo stub si no hay DLL -->
-  <PropertyGroup Condition="!Exists('libs\native\win-x64\Microsoft.FlightSimulator.SimConnect.dll')">
-    <DefineConstants>$(DefineConstants);SIMCONNECT_STUB</DefineConstants>
-  </PropertyGroup>
 
   <!-- 📁 Copia DLLs -->
   <ItemGroup>
@@ -73,21 +62,8 @@
     </Content>
   </ItemGroup>
 
-  <!-- 🔁 Copiar bin a publish -->
-  <Target Name="CopyBuildOutputToPublish" AfterTargets="Build" Condition="'$(Configuration)' == 'Release'">
-    <PropertyGroup>
-      <PublishOutputDir>$(ProjectDir)bin\$(Configuration)\$(TargetFramework)\$(RuntimeIdentifier)\publish\</PublishOutputDir>
-    </PropertyGroup>
-
-    <ItemGroup>
-      <BuildArtifacts Include="$(TargetDir)**\*.*" Exclude="$(PublishOutputDir)**\*.*" />
-    </ItemGroup>
-
-    <MakeDir Directories="$(PublishOutputDir)" />
-
-    <Copy SourceFiles="@(BuildArtifacts)"
-          DestinationFiles="@(BuildArtifacts->'$(PublishOutputDir)%(RecursiveDir)%(Filename)%(Extension)')"
-          SkipUnchangedFiles="true" />
-  </Target>
+  <ItemGroup>
+    <EmbeddedResource Include="SDKResources\**\*" />
+  </ItemGroup>
 
 </Project>
