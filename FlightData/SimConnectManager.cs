@@ -215,12 +215,12 @@ namespace SharedCockpitClient
             return registered;
         }
 
-        private void HandleSimConnectOpen(SimConnect _, SIMCONNECT_RECV_OPEN __)
+        private void HandleSimConnectOpen(SimConnect sender, SIMCONNECT_RECV_OPEN data)
         {
             OnSimConnectOpened();
         }
 
-        private void HandleSimConnectQuit(SimConnect _, SIMCONNECT_RECV __)
+        private void HandleSimConnectQuit(SimConnect sender, SIMCONNECT_RECV data)
         {
             Logger.Error("[SimConnect] ❌ Sesión cerrada.");
             _simConnect?.Dispose();
@@ -228,14 +228,15 @@ namespace SharedCockpitClient
             _simConnectEnumTypes.Clear();
             IsConnected = false;
             _initialSnapshotQueued = false;
+            StartOfflineLoop();
         }
 
-        private void HandleSimConnectException(SimConnect _, SIMCONNECT_RECV_EXCEPTION data)
+        private void HandleSimConnectException(SimConnect sender, SIMCONNECT_RECV_EXCEPTION data)
         {
             Logger.Warn($"[SimConnect] ⚠️ Excepción: {data.dwException}");
         }
 
-        private void HandleSimConnectSimobjectData(SimConnect _, SIMCONNECT_RECV_SIMOBJECT_DATA data)
+        private void HandleSimConnectSimobjectData(SimConnect sender, SIMCONNECT_RECV_SIMOBJECT_DATA data)
         {
             try
             {
@@ -247,7 +248,7 @@ namespace SharedCockpitClient
             }
         }
 
-        private void HandleSimConnectEvent(SimConnect _, SIMCONNECT_RECV_EVENT data)
+        private void HandleSimConnectEvent(SimConnect sender, SIMCONNECT_RECV_EVENT data)
         {
             if (!_clientEventById.TryGetValue((uint)data.uEventID, out var descriptor))
                 return;
@@ -313,7 +314,7 @@ namespace SharedCockpitClient
             _aircraftState.ApplySnapshot(snapshot.ToFlatDictionary());
         }
 
-        private void RegisterStructForDescriptor(SIMCONNECT_DATA_DEFINITION_ID definitionId, SimDataType type)
+        private void RegisterStructForDescriptor(SIMCONNECT_DATA_DEFINITION_ID defId, SimDataType type)
         {
             if (_simConnect == null)
                 return;
@@ -326,26 +327,28 @@ namespace SharedCockpitClient
             {
                 switch (type)
                 {
-                    case SimDataType.Float32 or SimDataType.Float64:
-                        simConnect.RegisterDataDefineStruct<double>(ToSimConnect(definitionId));
+                    case SimDataType.Float32:
+                    case SimDataType.Float64:
+                        simConnect.RegisterDataDefineStruct<double>(ToSimConnect(defId));
                         break;
 
-                    case SimDataType.Int32 or SimDataType.Bool:
-                        simConnect.RegisterDataDefineStruct<int>(ToSimConnect(definitionId));
+                    case SimDataType.Int32:
+                    case SimDataType.Bool:
+                        simConnect.RegisterDataDefineStruct<int>(ToSimConnect(defId));
                         break;
 
                     case SimDataType.String256:
-                        simConnect.RegisterDataDefineStruct<string>(ToSimConnect(definitionId));
+                        simConnect.RegisterDataDefineStruct<string>(ToSimConnect(defId));
                         break;
 
                     default:
-                        Logger.Warn($"[SimConnect] ⚠️ Tipo de dato no manejado en RegisterStructForDescriptor: {type}");
+                        Logger.Warn($"[SimConnect] Tipo de dato no manejado en RegisterStructForDescriptor: {type}");
                         break;
                 }
             }
             catch (Exception ex)
             {
-                Logger.Warn($"[SimConnect] ⚠️ Error registrando estructura para {definitionId}: {ex.Message}");
+                Logger.Warn($"[SimConnect] Error registrando estructura para {defId}: {ex.Message}");
             }
         }
 

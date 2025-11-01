@@ -76,6 +76,11 @@ try {
     $requiredLibs = @('Microsoft.FlightSimulator.SimConnect.dll', 'SimConnect.dll')
     $missingLibs = @()
     foreach ($lib in $requiredLibs) {
+        $sourceLib = Join-Path -Path $PSScriptRoot -ChildPath ("libs/native/win-x64/$lib")
+        if (Test-Path -Path $sourceLib) {
+            Copy-Item -Path $sourceLib -Destination (Join-Path -Path $publishDir -ChildPath $lib) -Force
+        }
+
         $libPath = Join-Path -Path $publishDir -ChildPath $lib
         if (-not (Test-Path -Path $libPath)) {
             $missingLibs += $lib

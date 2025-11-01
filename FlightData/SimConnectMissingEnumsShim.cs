@@ -1,49 +1,83 @@
-// ================================================================
-// 🔧 SimConnectMissingEnumsShim.cs
-// Corrige errores CS0246 por tipos faltantes del SDK de SimConnect
-// ================================================================
+// Este shim existe para garantizar que tipos usados por nuestro código
+// (por ejemplo SIMCONNECT_DATA_DEFINITION_ID) existan siempre, incluso si
+// la DLL de SimConnect real no los define exactamente igual.
+// IMPORTANTE: Esto NO debe chocar con las definiciones reales si existen.
+// Por eso usamos enums/clases ligeras y mantenemos los miembros mínimos
+// que utiliza el cliente. Si la DLL real ya define estos tipos, se espera
+// que sean compatibles con estas firmas.
 
-namespace SharedCockpitClient
+#nullable enable
+using System;
+
+namespace Microsoft.FlightSimulator.SimConnect
 {
-    internal enum SIMCONNECT_DATA_DEFINITION_ID : uint
+    public enum SIMCONNECT_DATA_DEFINITION_ID : uint { }
+    public enum SIMCONNECT_DATA_REQUEST_ID : uint { }
+    public enum SIMCONNECT_CLIENT_EVENT_ID : uint { }
+    public enum SIMCONNECT_NOTIFICATION_GROUP_ID : uint { }
+
+    public enum SIMCONNECT_GROUP_PRIORITY : uint
     {
-        DEFINITION_1,
-        DEFINITION_2
+        HIGHEST = 1,
+        DEFAULT = 1900000000
     }
 
-    internal enum SIMCONNECT_CLIENT_EVENT_ID : uint
+    public enum SIMCONNECT_EVENT_FLAG : uint
     {
-        EVENT_1,
-        EVENT_2
+        DEFAULT = 0,
+        GROUPID_IS_PRIORITY = 1
     }
 
-    internal enum SIMCONNECT_DATA_REQUEST_ID : uint
+    public enum SIMCONNECT_PERIOD : uint
     {
-        REQUEST_1,
-        REQUEST_2
+        NEVER = 0,
+        ONCE = 1,
+        VISUAL_FRAME = 2,
+        SIM_FRAME = 3,
+        SECOND = 4
     }
 
-    internal enum SIMCONNECT_NOTIFICATION_GROUP_ID : uint
+    [Flags]
+    public enum SIMCONNECT_DATA_REQUEST_FLAG : uint
     {
-        GROUP_1,
-        GROUP_2
+        DEFAULT = 0x00000000,
+        CHANGED = 0x00000001
     }
 
-    internal enum SIMCONNECT_GROUP_PRIORITY : uint
+    public enum SIMCONNECT_SIMOBJECT_TYPE : uint
     {
-        HIGHEST,
-        STANDARD,
-        LOWEST
+        USER = 0,
+        ALL = 1
     }
 
-    internal enum SIMCONNECT_EVENT_FLAG : uint
+    [Flags]
+    public enum SIMCONNECT_DATA_SET_FLAG : uint
     {
-        DEFAULT,
-        GROUPID_IS_PRIORITY
+        DEFAULT = 0x00000000
     }
 
-    internal enum SIMCONNECT_DATA_SET_FLAG : uint
+    public class SIMCONNECT_RECV_OPEN
     {
-        DEFAULT
+    }
+
+    public class SIMCONNECT_RECV
+    {
+    }
+
+    public class SIMCONNECT_RECV_EVENT
+    {
+        public uint uEventID;
+        public uint dwData;
+    }
+
+    public class SIMCONNECT_RECV_SIMOBJECT_DATA
+    {
+        public uint dwRequestID;
+        public object? dwData;
+    }
+
+    public class SIMCONNECT_RECV_EXCEPTION
+    {
+        public uint dwException;
     }
 }
