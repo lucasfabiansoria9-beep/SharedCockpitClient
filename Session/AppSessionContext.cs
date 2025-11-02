@@ -10,7 +10,11 @@ namespace SharedCockpitClient.Session
         public static StartupSessionInfo Current
         {
             get => _current ?? throw new InvalidOperationException("La sesión aún no fue inicializada.");
-            set => _current = value ?? throw new ArgumentNullException(nameof(value));
+            set
+            {
+                ArgumentNullException.ThrowIfNull(value);
+                _current = value;
+            }
         }
     }
 }

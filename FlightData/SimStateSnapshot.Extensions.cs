@@ -12,7 +12,7 @@ namespace SharedCockpitClient
         /// </summary>
         public static Dictionary<string, object?> ToDictionary(this SimStateSnapshot snapshot)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            ArgumentNullException.ThrowIfNull(snapshot);
             var root = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
 
             foreach (var kv in snapshot.Values)
@@ -28,7 +28,7 @@ namespace SharedCockpitClient
         /// </summary>
         public static Dictionary<string, object?> ToFlatDictionary(this SimStateSnapshot snapshot)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            ArgumentNullException.ThrowIfNull(snapshot);
             return new Dictionary<string, object?>(snapshot.Values, StringComparer.OrdinalIgnoreCase);
         }
 
@@ -37,7 +37,7 @@ namespace SharedCockpitClient
         /// </summary>
         public static bool TryApplyChange(this SimStateSnapshot snapshot, string path, object? value)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            ArgumentNullException.ThrowIfNull(snapshot);
             if (string.IsNullOrWhiteSpace(path)) return false;
 
             snapshot.Set(path, value);
@@ -49,8 +49,8 @@ namespace SharedCockpitClient
         /// </summary>
         public static SimStateSnapshot Merge(this SimStateSnapshot snapshot, IReadOnlyDictionary<string, object?> changes)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
-            if (changes == null) throw new ArgumentNullException(nameof(changes));
+            ArgumentNullException.ThrowIfNull(snapshot);
+            ArgumentNullException.ThrowIfNull(changes);
 
             var merged = snapshot.Clone();
             foreach (var kv in changes)
@@ -66,7 +66,7 @@ namespace SharedCockpitClient
         /// </summary>
         public static bool TryGetDouble(this SimStateSnapshot snapshot, string path, out double value)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            ArgumentNullException.ThrowIfNull(snapshot);
             value = 0;
             if (!snapshot.TryGetValue(path, out var raw) || raw is null)
                 return false;
@@ -101,7 +101,7 @@ namespace SharedCockpitClient
         /// </summary>
         public static bool TryGetBool(this SimStateSnapshot snapshot, string path, out bool value)
         {
-            if (snapshot == null) throw new ArgumentNullException(nameof(snapshot));
+            ArgumentNullException.ThrowIfNull(snapshot);
             value = false;
             if (!snapshot.TryGetValue(path, out var raw) || raw is null)
                 return false;
